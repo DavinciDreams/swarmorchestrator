@@ -1,0 +1,31 @@
+{
+  "name": "swarm-orchestrato",
+  "version": "1.0.0",
+  "description": "Deep Agent orchestrator for coordinating agent swarms via Claude Flow MCP",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "deepagents": "^1.6.1",
+    "@langchain/anthropic": "^1.3.12",
+    "@langchain/core": "^1.1.17",
+    "@langchain/langgraph": "^1.1.2",
+    "langchain": "^1.2.15",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^3.25.32",
+    "zod-to-json-schema": "^3.24.5",
+    "@langchain/openai": "^1.2.4",
+    "@langchain/langgraph-checkpoint-sqlite": "^1.0.0",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "tsx": "^4.19.2",
+    "@types/node": "^22.12.0",
+    "@types/better-sqlite3": "^7.6.13"
+  }
+}
