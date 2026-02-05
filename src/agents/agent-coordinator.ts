@@ -15,7 +15,7 @@ import { TaskAgent, TaskConfig, TaskResult, TaskDecomposition } from "./task-age
 import { MemoryAgent, MemoryNamespace, PatternEntry } from "./memory-agent.js";
 import { WorkerAgent, WorkerType, WorkerResult } from "./worker-agent.js";
 import { EvaluatorAgent, EvaluationResult, TaskEvaluation } from "./evaluator-agent.js";
-import { callMcpTool } from "../mcp/client.js";
+import { getDefaultPersistenceManager } from "../utils/persistence.js";
 
 export interface CoordinatorConfig {
   /** Enable iterative refinement for quality improvement */
@@ -176,46 +176,41 @@ export class AgentCoordinator {
   }
 
   /**
-   * Persist data to MCP memory
+   * Persist data with automatic fallback to local file
    */
   private async persistToMcp(key: string, data: Record<string, unknown>): Promise<void> {
-    try {
-      await callMcpTool("memory_store", {
-        namespace: "sdk_coordinator",
-        key,
-        value: JSON.stringify(data),
-      });
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : String(error);
-      console.warn(`[AgentCoordinator] Failed to persist to MCP: ${msg}`);
+    const persistence = getDefaultPersistenceManager();
+    const result = await persistence.store("sdk_coordinator", key, data);
+
+    if (!result.success) {
+      console.warn(`[AgentCoordinator] Failed to persist: ${result.error}`);
+    } else if (result.backend === "local") {
+      console.log(`[AgentCoordinator] Persisted to local file (MCP unavailable)`);
     }
   }
 
   /**
-   * Restore metrics from MCP memory
+   * Restore metrics with automatic fallback to local file
    */
   private async restoreMetrics(): Promise<void> {
-    try {
-      const result = await callMcpTool("memory_retrieve", {
-        namespace: "sdk_coordinator",
-        key: "coordinator_metrics",
-      });
+    const persistence = getDefaultPersistenceManager();
+    const result = await persistence.retrieve("sdk_coordinator", "coordinator_metrics");
 
-      const parsed = JSON.parse(result);
-      if (parsed && typeof parsed === "object") {
-        // Merge restored metrics
-        this.metrics = {
-          ...this.metrics,
-          totalTasks: parsed.totalTasks ?? this.metrics.totalTasks,
-          successfulTasks: parsed.successfulTasks ?? this.metrics.successfulTasks,
-          averageQuality: parsed.averageQuality ?? this.metrics.averageQuality,
-          averageIterations: parsed.averageIterations ?? this.metrics.averageIterations,
-          patternsLearned: parsed.patternsLearned ?? this.metrics.patternsLearned,
-        };
-        console.log("[AgentCoordinator] Restored metrics from previous session");
-      }
-    } catch {
+    if (result.success && result.data) {
+      const parsed = result.data;
+      // Merge restored metrics with type safety
+      this.metrics = {
+        ...this.metrics,
+        totalTasks: typeof parsed.totalTasks === "number" ? parsed.totalTasks : this.metrics.totalTasks,
+        successfulTasks: typeof parsed.successfulTasks === "number" ? parsed.successfulTasks : this.metrics.successfulTasks,
+        averageQuality: typeof parsed.averageQuality === "number" ? parsed.averageQuality : this.metrics.averageQuality,
+        averageIterations: typeof parsed.averageIterations === "number" ? parsed.averageIterations : this.metrics.averageIterations,
+        patternsLearned: typeof parsed.patternsLearned === "number" ? parsed.patternsLearned : this.metrics.patternsLearned,
+      };
+      console.log(`[AgentCoordinator] Restored metrics from ${result.backend} storage`);
+    } else {
       // No previous metrics, starting fresh
+      console.log("[AgentCoordinator] No previous metrics found, starting fresh");
     }
   }
 
@@ -237,8 +232,9 @@ export class AgentCoordinator {
       await this.initialize();
     }
 
-    console.log("\n=== Starting Coordinated Task Execution ===");
+    console.log("\n=== Task Execution ===");
     console.log(`Task: ${taskConfig.description}`);
+    console.log(`Type: ${taskConfig.type}`);
 
     this.metrics.totalTasks++;
 
@@ -249,12 +245,14 @@ export class AgentCoordinator {
         taskConfig.description,
         this.config.historicalLearning.retrievalTopK
       );
-      console.log(`Retrieved ${historicalPatterns.length} relevant patterns`);
+      console.log(`Patterns retrieved: ${historicalPatterns.length}`);
     }
 
     // Step 2: Create and decompose task
+    console.log("Creating task...");
     const taskResult = await this.taskAgent.createTask(taskConfig);
     if (taskResult.status === "failed") {
+      console.log("Task creation failed");
       return {
         success: false,
         taskId: taskResult.taskId,
@@ -264,6 +262,7 @@ export class AgentCoordinator {
         patterns: [],
       };
     }
+    console.log(`Task created: ${taskResult.taskId}`);
 
     // Step 3: Execute with iterative refinement
     let output = "";
@@ -272,6 +271,7 @@ export class AgentCoordinator {
     let evaluation: TaskEvaluation | undefined;
 
     if (this.config.iterativeRefinement.enabled) {
+      console.log("Dispatching with iterative refinement...");
       const refinementResult = await this.executeWithRefinement(
         taskResult.taskId,
         taskConfig,
@@ -282,12 +282,17 @@ export class AgentCoordinator {
       iterations = refinementResult.iterations;
       evaluation = refinementResult.evaluation;
     } else {
-      // Simple execution without refinement
+      console.log("Dispatching (single pass)...");
       const dispatchResult = await this.taskAgent.dispatchTask(taskResult.taskId, "parallel");
       output = dispatchResult.output || "";
       quality = 0.7; // Default quality without evaluation
       iterations = 1;
     }
+
+    console.log("\n--- Execution Result ---");
+    console.log(`Task ID: ${taskResult.taskId}`);
+    console.log(`Iterations: ${iterations}`);
+    console.log(`Output length: ${output.length} chars`);
 
     // Step 4: Record execution and learn patterns
     const patternIds = historicalPatterns.map((p) => p.id);
@@ -314,10 +319,16 @@ export class AgentCoordinator {
       evaluation,
     };
 
-    console.log("\n=== Task Execution Complete ===");
-    console.log(`Success: ${result.success}`);
-    console.log(`Quality: ${result.quality.toFixed(2)}`);
-    console.log(`Iterations: ${result.iterations}`);
+    console.log("\n--- Evaluation Result ---");
+    console.log(`Quality: ${result.quality.toFixed(2)} (threshold: ${this.config.iterativeRefinement.qualityThreshold})`);
+    console.log(`Passed: ${result.success}`);
+    if (evaluation?.evaluation) {
+      const e = evaluation.evaluation;
+      if (e.passedCriteria.length) console.log(`Passed: ${e.passedCriteria.join(", ")}`);
+      if (e.failedCriteria.length) console.log(`Failed: ${e.failedCriteria.join(", ")}`);
+      if (e.recommendations.length) console.log(`Recommendations: ${e.recommendations.join(", ")}`);
+    }
+    console.log(`Patterns applied: ${patternIds.length}`);
 
     return result;
   }

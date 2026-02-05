@@ -5,7 +5,7 @@
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { getProjectRoot, isWithinProject } from "../utils/project-context.js";
-import { callMcpTool } from "../mcp/client.js";
+import { getDefaultPersistenceManager } from "../utils/persistence.js";
 
 export interface AgentConfig {
   /** Model to use: 'haiku', 'sonnet', or 'opus' */
@@ -136,45 +136,39 @@ export class BaseAgent {
   // ===========================================================================
 
   /**
-   * Persist agent state to MCP memory
+   * Persist agent state with automatic fallback to local file
    */
   async persistState(sessionId: string, state: Record<string, unknown>): Promise<void> {
-    try {
-      await callMcpTool("memory_store", {
-        namespace: "agent_sessions",
-        key: `${this.name}-${sessionId}`,
-        value: JSON.stringify({
-          agentName: this.name,
-          sessionId,
-          state,
-          timestamp: new Date().toISOString(),
-        }),
-      });
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      console.warn(`[${this.name}] Failed to persist state: ${errorMessage}`);
+    const persistence = getDefaultPersistenceManager();
+    const result = await persistence.store("agent_sessions", `${this.name}-${sessionId}`, {
+      agentName: this.name,
+      sessionId,
+      state,
+      timestamp: new Date().toISOString(),
+    });
+
+    if (!result.success) {
+      console.warn(`[${this.name}] Failed to persist state: ${result.error}`);
+    } else if (result.backend === "local") {
+      console.log(`[${this.name}] Persisted state to local file (MCP unavailable)`);
     }
   }
 
   /**
-   * Retrieve agent state from MCP memory
+   * Retrieve agent state with automatic fallback to local file
    */
   async retrieveState(sessionId: string): Promise<Record<string, unknown> | null> {
-    try {
-      const result = await callMcpTool("memory_retrieve", {
-        namespace: "agent_sessions",
-        key: `${this.name}-${sessionId}`,
-      });
+    const persistence = getDefaultPersistenceManager();
+    const result = await persistence.retrieve("agent_sessions", `${this.name}-${sessionId}`);
 
-      const parsed = JSON.parse(result);
-      return parsed?.state ?? null;
-    } catch {
-      return null;
+    if (result.success && result.data) {
+      return (result.data.state as Record<string, unknown>) ?? null;
     }
+    return null;
   }
 
   /**
-   * Store execution history for learning
+   * Store execution history for learning with automatic fallback
    */
   async storeExecution(
     sessionId: string,
@@ -183,44 +177,56 @@ export class BaseAgent {
     success: boolean,
     metadata?: Record<string, unknown>
   ): Promise<void> {
-    try {
-      await callMcpTool("memory_store", {
-        namespace: "agent_executions",
-        key: `${this.name}-${sessionId}-${Date.now()}`,
-        value: JSON.stringify({
-          agentName: this.name,
-          sessionId,
-          input,
-          output,
-          success,
-          metadata,
-          timestamp: new Date().toISOString(),
-        }),
-      });
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      console.warn(`[${this.name}] Failed to store execution: ${errorMessage}`);
+    const persistence = getDefaultPersistenceManager();
+    const result = await persistence.store(
+      "agent_executions",
+      `${this.name}-${sessionId}-${Date.now()}`,
+      {
+        agentName: this.name,
+        sessionId,
+        input,
+        output,
+        success,
+        metadata,
+        timestamp: new Date().toISOString(),
+      }
+    );
+
+    if (!result.success) {
+      console.warn(`[${this.name}] Failed to store execution: ${result.error}`);
     }
   }
 
   /**
-   * Search memory for relevant context
+   * Search memory for relevant context with automatic fallback
+   * Note: Local file search is basic text matching, not semantic search
    */
   async searchMemory(query: string, namespace = "agent_executions", limit = 5): Promise<string[]> {
-    try {
-      const result = await callMcpTool("memory_search", {
-        namespace,
-        query,
-        limit,
-      });
+    const persistence = getDefaultPersistenceManager();
 
-      const parsed = JSON.parse(result);
-      if (Array.isArray(parsed)) {
-        return parsed.map((item) => (typeof item === "string" ? item : JSON.stringify(item)));
+    // Get all keys in namespace
+    const { keys } = await persistence.list(namespace);
+
+    const results: Array<{ key: string; relevance: number; data: string }> = [];
+
+    // Search through each entry
+    for (const key of keys) {
+      const result = await persistence.retrieve(namespace, key);
+      if (result.success && result.data) {
+        const dataStr = JSON.stringify(result.data);
+        const queryLower = query.toLowerCase();
+        const dataLower = dataStr.toLowerCase();
+
+        // Simple relevance scoring based on keyword matching
+        if (dataLower.includes(queryLower)) {
+          const relevance = (dataLower.match(new RegExp(queryLower, "g")) || []).length;
+          results.push({ key, relevance, data: dataStr });
+        }
       }
-      return [];
-    } catch {
-      return [];
     }
+
+    // Sort by relevance and limit
+    results.sort((a, b) => b.relevance - a.relevance);
+    return results.slice(0, limit).map((r) => r.data);
   }
 }
