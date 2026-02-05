@@ -35,7 +35,7 @@ export const swarmInit = tool(
         .optional()
         .describe("Maximum number of agents in the swarm"),
       config: z
-        .record(z.unknown())
+        .record(z.string(), z.unknown())
         .optional()
         .describe("Additional swarm configuration"),
     }),

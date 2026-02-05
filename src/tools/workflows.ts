@@ -24,7 +24,7 @@ export const workflowExecute = tool(
     schema: z.object({
       workflowId: z.string().describe("Workflow ID to execute"),
       variables: z
-        .record(z.unknown())
+        .record(z.string(), z.unknown())
         .optional()
         .describe("Runtime variables to inject into the workflow"),
     }),
@@ -52,7 +52,7 @@ export const workflowCreate = tool(
           z.object({
             name: z.string(),
             type: z.enum(["task", "condition", "parallel", "loop", "wait"]),
-            config: z.record(z.unknown()).optional(),
+            config: z.record(z.string(), z.unknown()).optional(),
           }),
         )
         .optional()

@@ -32,7 +32,7 @@ export const agentSpawn = tool(
         .optional()
         .describe("Claude model to use"),
       domain: z.string().optional().describe("Agent domain"),
-      config: z.record(z.unknown()).optional().describe("Additional agent configuration"),
+      config: z.record(z.string(), z.unknown()).optional().describe("Additional agent configuration"),
     }),
   },
 );
@@ -150,7 +150,7 @@ export const agentUpdate = tool(
       agentId: z.string().describe("Target agent"),
       status: z.string().optional().describe("New agent status"),
       health: z.number().optional().describe("Health value (0-1)"),
-      config: z.record(z.unknown()).optional().describe("Config updates"),
+      config: z.record(z.string(), z.unknown()).optional().describe("Config updates"),
     }),
   },
 );

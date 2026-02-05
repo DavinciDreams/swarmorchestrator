@@ -195,7 +195,7 @@ export const taskComplete = tool(
     schema: z.object({
       taskId: z.string().describe("Task ID to complete"),
       result: z
-        .record(z.unknown())
+        .record(z.string(), z.unknown())
         .optional()
         .describe("Result data to attach"),
     }),
