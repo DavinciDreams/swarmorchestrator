@@ -7,9 +7,17 @@
   "scripts": {
     "build": "tsc",
     "start": "tsx src/index.ts",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "daemon": "tsx src/daemon.ts",
+    "daemon:start": "tsx src/daemon.ts start",
+    "daemon:status": "tsx src/daemon.ts status",
+    "worker:audit": "tsx src/daemon.ts run audit",
+    "worker:map": "tsx src/daemon.ts run map",
+    "worker:optimize": "tsx src/daemon.ts run optimize",
+    "worker:testgaps": "tsx src/daemon.ts run testgaps"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.30",
     "deepagents": "^1.6.1",
     "@langchain/anthropic": "^1.3.12",
     "@langchain/core": "^1.1.17",

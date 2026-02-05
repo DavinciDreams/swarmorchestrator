@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "claude-flow": {
+    "_claude-flow": {
       "command": "npx",
       "args": ["@claude-flow/cli@latest", "mcp", "start"],
       "env": {
@@ -10,7 +10,7 @@
         "CLAUDE_FLOW_MAX_AGENTS": "15",
         "CLAUDE_FLOW_MEMORY_BACKEND": "hybrid"
       },
-      "autoStart": true
+      "autoStart": false
     }
   }
 }

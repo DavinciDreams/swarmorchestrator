@@ -11,14 +11,48 @@
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import { callMcpTool } from "../mcp/client.js";
+import { optionalParams } from "../utils/params.js";
+import {
+  getProjectRoot,
+  extractAndValidatePaths,
+  getProjectContextString,
+} from "../utils/project-context.js";
 
 export const taskOrchestrate = tool(
   async ({ task, strategy, agents, timeout }) => {
+    // Validate paths in the task description
+    let projectRoot: string;
+    try {
+      projectRoot = getProjectRoot();
+    } catch {
+      // If project root is not set, proceed without validation
+      return callMcpTool("coordination_orchestrate", {
+        task,
+        strategy,
+        ...optionalParams({ agents, timeout }),
+      });
+    }
+
+    const { invalid } = extractAndValidatePaths(task);
+
+    if (invalid.length > 0) {
+      return JSON.stringify({
+        error: "SCOPE_VIOLATION",
+        message: `Task references paths outside the project boundary.`,
+        projectRoot,
+        invalidPaths: invalid,
+        suggestion:
+          "Modify the task to only reference files within the project directory.",
+      });
+    }
+
+    // Inject project context into the task
+    const enhancedTask = `${getProjectContextString()}\n\nTASK:\n${task}`;
+
     return callMcpTool("coordination_orchestrate", {
-      task,
+      task: enhancedTask,
       strategy,
-      ...(agents ? { agents } : {}),
-      ...(timeout ? { timeout } : {}),
+      ...optionalParams({ agents, timeout }),
     });
   },
   {
@@ -27,7 +61,8 @@ export const taskOrchestrate = tool(
       "Dispatch a complex task to the swarm for execution. The task will be " +
       "decomposed and assigned to appropriate agents based on the strategy. " +
       "Use 'parallel' for independent subtasks, 'sequential' for ordered dependencies, " +
-      "'pipeline' for staged handoffs, 'broadcast' for all agents simultaneously.",
+      "'pipeline' for staged handoffs, 'broadcast' for all agents simultaneously. " +
+      "Tasks are automatically validated to ensure they operate within the project boundary.",
     schema: z.object({
       task: z.string().describe("Full task description with context and goals"),
       strategy: z
@@ -48,19 +83,47 @@ export const taskOrchestrate = tool(
 
 export const taskCreate = tool(
   async ({ type, description, priority, tags, assignTo }) => {
+    // Validate paths in the task description
+    let projectRoot: string;
+    try {
+      projectRoot = getProjectRoot();
+    } catch {
+      // If project root is not set, proceed without validation
+      return callMcpTool("task_create", {
+        type,
+        description,
+        ...optionalParams({ priority, tags, assignTo }),
+      });
+    }
+
+    const { invalid } = extractAndValidatePaths(description);
+
+    if (invalid.length > 0) {
+      return JSON.stringify({
+        error: "SCOPE_VIOLATION",
+        message: `Task references paths outside the project boundary.`,
+        projectRoot,
+        invalidPaths: invalid,
+        suggestion:
+          "Modify the task description to only reference files within the project directory.",
+      });
+    }
+
+    // Inject project context into the description
+    const enhancedDescription = `[Project: ${projectRoot}]\n\n${description}`;
+
     return callMcpTool("task_create", {
       type,
-      description,
-      ...(priority ? { priority } : {}),
-      ...(tags ? { tags } : {}),
-      ...(assignTo ? { assignTo } : {}),
+      description: enhancedDescription,
+      ...optionalParams({ priority, tags, assignTo }),
     });
   },
   {
     name: "task_create",
     description:
       "Create a new task in the task system. Returns a task ID for tracking. " +
-      "Use this for individual work items that need to be assigned to agents.",
+      "Use this for individual work items that need to be assigned to agents. " +
+      "Tasks are automatically validated to ensure they operate within the project boundary.",
     schema: z.object({
       type: z
         .enum(["feature", "bugfix", "research", "refactor"])
@@ -100,11 +163,7 @@ export const taskStatus = tool(
 export const taskList = tool(
   async ({ status, type, priority, assignedTo, limit }) => {
     return callMcpTool("task_list", {
-      ...(status ? { status } : {}),
-      ...(type ? { type } : {}),
-      ...(priority ? { priority } : {}),
-      ...(assignedTo ? { assignedTo } : {}),
-      ...(limit ? { limit } : {}),
+      ...optionalParams({ status, type, priority, assignedTo, limit }),
     });
   },
   {
@@ -126,7 +185,7 @@ export const taskComplete = tool(
   async ({ taskId, result }) => {
     return callMcpTool("task_complete", {
       taskId,
-      ...(result ? { result } : {}),
+      ...optionalParams({ result }),
     });
   },
   {
@@ -145,10 +204,37 @@ export const taskComplete = tool(
 
 export const loadBalance = tool(
   async ({ task, algorithm }) => {
+    // Validate paths in the task description
+    let projectRoot: string;
+    try {
+      projectRoot = getProjectRoot();
+    } catch {
+      // If project root is not set, proceed without validation
+      return callMcpTool("coordination_load_balance", {
+        action: "distribute",
+        task,
+        ...optionalParams({ algorithm }),
+      });
+    }
+
+    const { invalid } = extractAndValidatePaths(task);
+
+    if (invalid.length > 0) {
+      return JSON.stringify({
+        error: "SCOPE_VIOLATION",
+        message: `Task references paths outside the project boundary.`,
+        projectRoot,
+        invalidPaths: invalid,
+      });
+    }
+
+    // Inject project context
+    const enhancedTask = `[Project: ${projectRoot}] ${task}`;
+
     return callMcpTool("coordination_load_balance", {
       action: "distribute",
-      task,
-      ...(algorithm ? { algorithm } : {}),
+      task: enhancedTask,
+      ...optionalParams({ algorithm }),
     });
   },
   {
@@ -156,7 +242,8 @@ export const loadBalance = tool(
     description:
       "Distribute a task across available agents based on " +
       "current load, capabilities, and performance history. " +
-      "Optimizes for throughput and minimizes bottlenecks.",
+      "Optimizes for throughput and minimizes bottlenecks. " +
+      "Tasks are validated to stay within project boundaries.",
     schema: z.object({
       task: z.string().describe("Task description to distribute"),
       algorithm: z
@@ -171,8 +258,7 @@ export const coordinationSync = tool(
   async ({ force, conflictResolution }) => {
     return callMcpTool("coordination_sync", {
       action: "trigger",
-      ...(force !== undefined ? { force } : {}),
-      ...(conflictResolution ? { conflictResolution } : {}),
+      ...optionalParams({ force, conflictResolution }),
     });
   },
   {
@@ -199,7 +285,7 @@ export const consensus = tool(
     return callMcpTool("hive-mind_consensus", {
       action: "propose",
       value: proposal,
-      ...(type ? { type } : {}),
+      ...optionalParams({ type }),
     });
   },
   {

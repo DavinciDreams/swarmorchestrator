@@ -8,16 +8,22 @@
 import "dotenv/config";
 import { HumanMessage } from "@langchain/core/messages";
 import { createOrchestrator, type Provider } from "./orchestrator.js";
-import { disconnect } from "./mcp/client.js";
+import { disconnect, initializeMcp, isMcpEnabled } from "./mcp/client.js";
 import * as readline from "node:readline";
+import * as path from "node:path";
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-});
-
-function prompt(question: string): Promise<string> {
-  return new Promise((resolve) => rl.question(question, resolve));
+/**
+ * Check if an error is a "prompt too long" error
+ */
+function isPromptTooLongError(err: any): boolean {
+  const msg = String(err?.cause?.message ?? err?.message ?? err).toLowerCase();
+  return (
+    msg.includes("prompt too long") ||
+    msg.includes("context_length_exceeded") ||
+    msg.includes("maximum context length") ||
+    msg.includes("token limit") ||
+    (msg.includes("400") && msg.includes("too long"))
+  );
 }
 
 async function main() {
@@ -28,27 +34,83 @@ async function main() {
   console.log("╚══════════════════════════════════════════════╝");
   console.log();
 
-  const provider = (process.env.LLM_PROVIDER as Provider | undefined) ?? "anthropic";
+  // Initialize MCP BEFORE readline to prevent stdio conflicts
+  // The MCP subprocess can interfere with terminal input if started mid-prompt
+  if (isMcpEnabled()) {
+    console.log("Initializing MCP connection...");
+    try {
+      await initializeMcp();
+      console.log("MCP connection established.");
+    } catch (err) {
+      console.warn("MCP initialization failed (continuing without MCP):", err);
+    }
+  }
+
+  // Project root is REQUIRED — defaults to current working directory
+  // Set ORCHESTRATOR_PROJECT_ROOT to override
+  const projectRoot = path.resolve(process.env.ORCHESTRATOR_PROJECT_ROOT ?? process.cwd());
+
+  // Provider defaults: Anthropic (Agent SDK) primary, z.ai fallback
+  const provider = (process.env.LLM_PROVIDER as Provider | undefined);
   const fallback = (process.env.LLM_FALLBACK_PROVIDER as Provider | undefined);
-  const { agent, recursionLimit, providerName } = await createOrchestrator({
-    provider,
-    fallbackProvider: fallback,
+  const { agent, recursionLimit, providerName, projectRoot: resolvedRoot } = await createOrchestrator({
+    projectRoot,
+    provider,        // Default: anthropic
+    fallbackProvider: fallback,  // Default: zai
     workDir: process.env.ORCHESTRATOR_WORKDIR ?? "./orchestrator-workspace",
   });
 
-  const threadId = `orchestrator-${Date.now()}`;
-  console.log(`Provider: ${providerName}`);
-  console.log(`Session: ${threadId}`);
-  console.log('Type your goal or mission. Type "exit" to quit.\n');
+  let threadId = `orchestrator-${Date.now()}`;
+  let messageCount = 0;
 
-  while (true) {
+  console.log(`Provider: ${providerName}`);
+  console.log(`Project: ${resolvedRoot}`);
+  console.log(`Session: ${threadId}`);
+  console.log('Commands: "exit" to quit, "reset" to start fresh session\n');
+
+  // Create readline AFTER MCP is initialized to prevent stdio conflicts
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: process.stdin.isTTY ?? false,
+  });
+
+  let running = true;
+
+  // Handle readline close gracefully
+  rl.on("close", () => {
+    running = false;
+  });
+
+  // Ensure readline doesn't interfere with subprocess stdio
+  const prompt = (question: string): Promise<string | null> => {
+    if (!running) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      rl.question(question, (answer) => resolve(answer));
+    });
+  };
+
+  while (running) {
     const input = await prompt("mission> ");
+
+    // Handle EOF or closed readline
+    if (input === null) {
+      console.log("\nInput closed, shutting down...");
+      break;
+    }
+
     const trimmed = input.trim();
 
     if (!trimmed) continue;
     if (trimmed.toLowerCase() === "exit") {
       console.log("\nShutting down orchestrator...");
       break;
+    }
+    if (trimmed.toLowerCase() === "reset") {
+      threadId = `orchestrator-${Date.now()}`;
+      messageCount = 0;
+      console.log(`\nSession reset. New session: ${threadId}\n`);
+      continue;
     }
 
     try {
@@ -61,6 +123,8 @@ async function main() {
           configurable: { thread_id: threadId },
         },
       );
+
+      messageCount++;
 
       // Print the assistant's final response
       const messages = result.messages ?? [];
@@ -88,8 +152,28 @@ async function main() {
       }
 
       console.log();
-    } catch (err) {
-      console.error("Orchestrator error:", err);
+    } catch (err: any) {
+      // Extract meaningful error message
+      const errorMsg = err?.cause?.message ?? err?.message ?? String(err);
+      console.error("\nOrchestrator error:", errorMsg);
+
+      // Check for common issues
+      if (errorMsg.includes("authentication") || errorMsg.includes("api-key") || errorMsg.includes("401")) {
+        console.error("Hint: Check your ANTHROPIC_API_KEY or LLM_PROVIDER setting in .env");
+      } else if (isPromptTooLongError(err)) {
+        console.error("\n╔══════════════════════════════════════════════════════════════╗");
+        console.error("║  CONTEXT LIMIT EXCEEDED                                      ║");
+        console.error("╠══════════════════════════════════════════════════════════════╣");
+        console.error("║  The conversation history has grown too large for the model. ║");
+        console.error("║                                                              ║");
+        console.error("║  Options:                                                    ║");
+        console.error("║    1. Type 'reset' to start a fresh session                  ║");
+        console.error("║    2. Reduce complexity of your requests                     ║");
+        console.error("║    3. Use a model with larger context (200K Claude, etc.)    ║");
+        console.error("╚══════════════════════════════════════════════════════════════╝");
+        console.error(`\nCurrent session has ~${messageCount} interactions.`);
+      }
+
       console.log("Continuing...\n");
     }
   }

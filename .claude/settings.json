@@ -37,6 +37,17 @@
     ],
     "PostToolUse": [
       {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/helpers/context-threshold.sh track-tool \"${TOOL_NAME:-}\" \"${TOOL_INPUT:-}\" \"${TOOL_RESULT:-}\" 2>/dev/null || true",
+            "timeout": 3000,
+            "continueOnError": true
+          }
+        ]
+      },
+      {
         "matcher": "^(Write|Edit|MultiEdit)$",
         "hooks": [
           {
@@ -73,6 +84,12 @@
     "UserPromptSubmit": [
       {
         "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$PROMPT\" ] && .claude/helpers/context-threshold.sh pre-prompt \"$PROMPT\" 2>/dev/null || true",
+            "timeout": 3000,
+            "continueOnError": true
+          },
           {
             "type": "command",
             "command": "[ -n \"$PROMPT\" ] && npx @claude-flow/cli@latest hooks route --task \"$PROMPT\" || true",
@@ -149,6 +166,17 @@
       "default": "claude-opus-4-5-20251101",
       "routing": "claude-3-5-haiku-20241022"
     },
+    "contextThreshold": {
+      "enabled": true,
+      "threshold": 90,
+      "warnAt": 80,
+      "maxTokens": 200000,
+      "actions": {
+        "autoSummarize": true,
+        "saveToMemory": true,
+        "spawnNewSession": true
+      }
+    },
     "swarm": {
       "topology": "hierarchical-mesh",
       "maxAgents": 15
@@ -161,7 +189,7 @@
       "enabled": true
     },
     "daemon": {
-      "autoStart": true,
+      "autoStart": false,
       "workers": [
         "map",
         "audit",

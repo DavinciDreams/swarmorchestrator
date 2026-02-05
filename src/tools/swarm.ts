@@ -9,24 +9,23 @@
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import { callMcpTool } from "../mcp/client.js";
+import { optionalParams } from "../utils/params.js";
 
 export const swarmInit = tool(
   async ({ topology, maxAgents, config }) => {
     return callMcpTool("swarm_init", {
-      ...(topology ? { topology } : {}),
-      ...(maxAgents ? { maxAgents } : {}),
-      ...(config ? { config } : {}),
+      ...optionalParams({ topology, maxAgents, config }),
     });
   },
   {
     name: "swarm_init",
     description:
       "Initialize a new agent swarm with a specific topology. " +
-      "Topologies: hierarchical (queen-led, anti-drift), mesh (peer-to-peer), " +
-      "ring (sequential), star (central hub), adaptive (dynamic).",
+      "Topologies: hierarchical (queen-led), hierarchical-mesh (queen + peer mesh, recommended), " +
+      "mesh (peer-to-peer), ring (sequential), star (central hub), adaptive (dynamic), hybrid.",
     schema: z.object({
       topology: z
-        .enum(["mesh", "hierarchical", "ring", "star", "adaptive"])
+        .enum(["mesh", "hierarchical", "hierarchical-mesh", "ring", "star", "adaptive", "hybrid"])
         .optional()
         .describe("Swarm topology pattern"),
       maxAgents: z
@@ -46,7 +45,7 @@ export const swarmInit = tool(
 export const swarmStatus = tool(
   async ({ swarmId }) => {
     return callMcpTool("swarm_status", {
-      ...(swarmId ? { swarmId } : {}),
+      ...optionalParams({ swarmId }),
     });
   },
   {
@@ -67,7 +66,7 @@ export const swarmStatus = tool(
 export const swarmHealth = tool(
   async ({ swarmId }) => {
     return callMcpTool("swarm_health", {
-      ...(swarmId ? { swarmId } : {}),
+      ...optionalParams({ swarmId }),
     });
   },
   {
@@ -88,8 +87,7 @@ export const swarmScale = tool(
   async ({ targetSize, agentType }) => {
     return callMcpTool("agent_pool", {
       action: "scale",
-      ...(targetSize ? { targetSize } : {}),
-      ...(agentType ? { agentType } : {}),
+      ...optionalParams({ targetSize, agentType }),
     });
   },
   {
@@ -107,7 +105,7 @@ export const swarmScale = tool(
 export const swarmShutdown = tool(
   async ({ swarmId, graceful }) => {
     return callMcpTool("swarm_shutdown", {
-      ...(swarmId ? { swarmId } : {}),
+      ...optionalParams({ swarmId }),
       graceful: graceful ?? true,
     });
   },
@@ -130,7 +128,7 @@ export const topologyOptimize = tool(
   async ({ type }) => {
     return callMcpTool("coordination_topology", {
       action: "optimize",
-      ...(type ? { type } : {}),
+      ...optionalParams({ type }),
     });
   },
   {
@@ -141,7 +139,7 @@ export const topologyOptimize = tool(
       "or vice versa.",
     schema: z.object({
       type: z
-        .enum(["mesh", "hierarchical", "ring", "star", "hybrid", "hierarchical-mesh", "adaptive"])
+        .enum(["mesh", "hierarchical", "hierarchical-mesh", "ring", "star", "hybrid", "adaptive"])
         .optional()
         .describe("Suggest a target topology, or omit for auto-optimization"),
     }),

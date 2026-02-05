@@ -9,15 +9,14 @@
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import { callMcpTool } from "../mcp/client.js";
+import { optionalParams } from "../utils/params.js";
 
 export const memoryStore = tool(
   async ({ key, value, namespace, tags, ttl }) => {
     return callMcpTool("memory_store", {
       key,
       value,
-      ...(namespace ? { namespace } : {}),
-      ...(tags ? { tags } : {}),
-      ...(ttl ? { ttl } : {}),
+      ...optionalParams({ namespace, tags, ttl }),
     });
   },
   {
@@ -50,7 +49,7 @@ export const memoryRetrieve = tool(
   async ({ key, namespace }) => {
     return callMcpTool("memory_retrieve", {
       key,
-      ...(namespace ? { namespace } : {}),
+      ...optionalParams({ namespace }),
     });
   },
   {
@@ -71,9 +70,7 @@ export const memorySearch = tool(
   async ({ query, namespace, limit, threshold }) => {
     return callMcpTool("memory_search", {
       query,
-      ...(namespace ? { namespace } : {}),
-      ...(limit ? { limit } : {}),
-      ...(threshold ? { threshold } : {}),
+      ...optionalParams({ namespace, limit, threshold }),
     });
   },
   {
@@ -104,9 +101,7 @@ export const memorySearch = tool(
 export const memoryList = tool(
   async ({ namespace, limit, offset }) => {
     return callMcpTool("memory_list", {
-      ...(namespace ? { namespace } : {}),
-      ...(limit ? { limit } : {}),
-      ...(offset ? { offset } : {}),
+      ...optionalParams({ namespace, limit, offset }),
     });
   },
   {
@@ -129,7 +124,7 @@ export const memoryDelete = tool(
   async ({ key, namespace }) => {
     return callMcpTool("memory_delete", {
       key,
-      ...(namespace ? { namespace } : {}),
+      ...optionalParams({ namespace }),
     });
   },
   {
@@ -151,7 +146,7 @@ export const stateSnapshot = tool(
   async ({ name, description }) => {
     return callMcpTool("session_save", {
       name,
-      ...(description ? { description } : {}),
+      ...optionalParams({ description }),
       includeAgents: true,
       includeMemory: true,
       includeTasks: true,
@@ -176,8 +171,7 @@ export const stateSnapshot = tool(
 export const contextRestore = tool(
   async ({ sessionId, name }) => {
     return callMcpTool("session_restore", {
-      ...(sessionId ? { sessionId } : {}),
-      ...(name ? { name } : {}),
+      ...optionalParams({ sessionId, name }),
     });
   },
   {

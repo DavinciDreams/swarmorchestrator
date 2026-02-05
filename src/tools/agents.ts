@@ -8,16 +8,13 @@
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import { callMcpTool } from "../mcp/client.js";
+import { optionalParams } from "../utils/params.js";
 
 export const agentSpawn = tool(
   async ({ agentType, agentId, task, model, domain, config }) => {
     return callMcpTool("agent_spawn", {
       agentType,
-      ...(agentId ? { agentId } : {}),
-      ...(task ? { task } : {}),
-      ...(model ? { model } : {}),
-      ...(domain ? { domain } : {}),
-      ...(config ? { config } : {}),
+      ...optionalParams({ agentId, task, model, domain, config }),
     });
   },
   {
@@ -43,9 +40,7 @@ export const agentSpawn = tool(
 export const agentList = tool(
   async ({ status, domain, includeTerminated }) => {
     return callMcpTool("agent_list", {
-      ...(status ? { status } : {}),
-      ...(domain ? { domain } : {}),
-      ...(includeTerminated !== undefined ? { includeTerminated } : {}),
+      ...optionalParams({ status, domain, includeTerminated }),
     });
   },
   {
@@ -73,8 +68,7 @@ export const agentList = tool(
 export const agentHealth = tool(
   async ({ agentId, threshold }) => {
     return callMcpTool("agent_health", {
-      ...(agentId ? { agentId } : {}),
-      ...(threshold ? { threshold } : {}),
+      ...optionalParams({ agentId, threshold }),
     });
   },
   {
@@ -99,8 +93,7 @@ export const agentBroadcast = tool(
   async ({ message, fromId, priority }) => {
     return callMcpTool("hive-mind_broadcast", {
       message,
-      ...(fromId ? { fromId } : {}),
-      ...(priority ? { priority } : {}),
+      ...optionalParams({ fromId, priority }),
     });
   },
   {
@@ -123,7 +116,7 @@ export const agentTerminate = tool(
   async ({ agentId, force }) => {
     return callMcpTool("agent_terminate", {
       agentId,
-      ...(force !== undefined ? { force } : {}),
+      ...optionalParams({ force }),
     });
   },
   {
@@ -145,9 +138,7 @@ export const agentUpdate = tool(
   async ({ agentId, status, health, config }) => {
     return callMcpTool("agent_update", {
       agentId,
-      ...(status ? { status } : {}),
-      ...(health !== undefined ? { health } : {}),
-      ...(config ? { config } : {}),
+      ...optionalParams({ status, health, config }),
     });
   },
   {
@@ -168,7 +159,7 @@ export const capabilityMatch = tool(
   async ({ task, context }) => {
     return callMcpTool("hooks_route", {
       task,
-      ...(context ? { context } : {}),
+      ...optionalParams({ context }),
     });
   },
   {

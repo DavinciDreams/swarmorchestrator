@@ -8,12 +8,13 @@
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import { callMcpTool } from "../mcp/client.js";
+import { optionalParams } from "../utils/params.js";
 
 export const workflowExecute = tool(
   async ({ workflowId, variables }) => {
     return callMcpTool("workflow_execute", {
       workflowId,
-      ...(variables ? { variables } : {}),
+      ...optionalParams({ variables }),
     });
   },
   {
@@ -34,8 +35,7 @@ export const workflowCreate = tool(
   async ({ name, description, steps }) => {
     return callMcpTool("workflow_create", {
       name,
-      ...(description ? { description } : {}),
-      ...(steps ? { steps } : {}),
+      ...optionalParams({ description, steps }),
     });
   },
   {
@@ -64,9 +64,7 @@ export const workflowCreate = tool(
 export const performanceReport = tool(
   async ({ format, timeRange, components }) => {
     return callMcpTool("performance_report", {
-      ...(format ? { format } : {}),
-      ...(timeRange ? { timeRange } : {}),
-      ...(components ? { components } : {}),
+      ...optionalParams({ format, timeRange, components }),
     });
   },
   {
@@ -96,9 +94,7 @@ export const performanceReport = tool(
 export const bottleneckAnalyze = tool(
   async ({ component, deep, threshold }) => {
     return callMcpTool("performance_bottleneck", {
-      ...(component ? { component } : {}),
-      ...(deep !== undefined ? { deep } : {}),
-      ...(threshold ? { threshold } : {}),
+      ...optionalParams({ component, deep, threshold }),
     });
   },
   {
@@ -127,9 +123,7 @@ export const bottleneckAnalyze = tool(
 export const healthCheck = tool(
   async ({ deep, fix, components }) => {
     return callMcpTool("system_health", {
-      ...(deep !== undefined ? { deep } : {}),
-      ...(fix !== undefined ? { fix } : {}),
-      ...(components ? { components } : {}),
+      ...optionalParams({ deep, fix, components }),
     });
   },
   {
@@ -160,9 +154,7 @@ export const faultTolerance = tool(
   async ({ agentId, feedback, performanceScore, suggestions }) => {
     return callMcpTool("daa_agent_adapt", {
       agentId,
-      ...(feedback ? { feedback } : {}),
-      ...(performanceScore !== undefined ? { performanceScore } : {}),
-      ...(suggestions ? { suggestions } : {}),
+      ...optionalParams({ feedback, performanceScore, suggestions }),
     });
   },
   {

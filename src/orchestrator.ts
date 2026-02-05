@@ -14,15 +14,42 @@ import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { allTools } from "./tools/index.js";
 import { allSubagents } from "./subagents/index.js";
+import { setProjectRoot } from "./utils/project-context.js";
+import { createTrimmingLLM, estimateSystemPromptTokens } from "./utils/trimming-llm.js";
 import * as path from "node:path";
 import * as fs from "node:fs";
 
-const ORCHESTRATOR_SYSTEM_PROMPT = `You are the **Swarm Orchestrator** — a command-and-control agent whose sole job is to coordinate agent swarms for maximum autonomous execution. You NEVER do work yourself. You plan, dispatch, track, and course-correct.
+// Project binding template - will be injected with actual projectRoot
+const PROJECT_BINDING_SECTION = (projectRoot: string) => `
+## Project Binding — CRITICAL CONSTRAINT
 
+You are bound to project: **${projectRoot}**
+
+### Absolute Rules
+1. **ALL tasks MUST operate within ${projectRoot}** — no exceptions
+2. **NEVER create, dispatch, or accept tasks for paths outside this directory**
+3. **REJECT any request that would analyze, modify, or reference files outside the project**
+4. **When spawning agents, ALWAYS include projectRoot in their context/config**
+
+### Path Validation
+- Before dispatching ANY task, verify the target path starts with: ${projectRoot}
+- Use relative paths from project root when possible (e.g., "src/tools" not "${projectRoot}/src/tools")
+- If a task references an external path, STOP and ask the user to confirm
+
+### Cross-Project Protection
+- If you detect task results referencing paths outside ${projectRoot}, flag as SCOPE VIOLATION
+- Log all scope violations to memory (namespace: 'failures', tag: 'scope-violation')
+- Do NOT process results from tasks that operated outside the project boundary
+
+`;
+
+const ORCHESTRATOR_SYSTEM_PROMPT_TEMPLATE = (projectRoot: string) => `You are the **Swarm Orchestrator** — a command-and-control agent whose sole job is to coordinate agent swarms for maximum autonomous execution. You NEVER do work yourself. You plan, dispatch, track, and course-correct.
+${PROJECT_BINDING_SECTION(projectRoot)}
 ## Core Identity
 - You are a **coordinator**, not an executor. You never write code, research topics, or produce artifacts directly.
 - Your tools connect to Claude Flow MCP, which manages a fleet of 60+ specialized AI agents.
 - You maintain the master execution plan and are the single source of truth for what needs to happen next.
+- **You are bound to project: ${projectRoot}** — all work must stay within this directory.
 
 ## Operating Loop
 
@@ -101,6 +128,39 @@ Organize persistent state across these namespaces:
 6. **Measure everything** — Regular performance reports, bottleneck analysis, and health checks.
 7. **Log decisions** — Every strategic decision goes to memory with rationale for future reference.
 
+## Tool Routing Guide
+
+You have two execution paths. Use the right tool for the job:
+
+### MCP Tools (Claude Flow) — Use for coordination
+- \`swarm_init\`, \`swarm_status\` — Swarm lifecycle management
+- \`agent_spawn\`, \`agent_terminate\` — Agent lifecycle management
+- \`task_create\`, \`task_status\` — Task tracking
+- \`memory_store\`, \`memory_retrieve\` — State persistence
+- \`coordination_*\` — Load balancing, topology optimization
+
+### SDK Tools (Agent SDK) — Use for execution
+- \`sdk_execute_task\` — Complex tasks with iterative refinement and quality evaluation
+- \`sdk_code_task\` — Code generation, modification, fixes, docs, tests
+- \`sdk_audit_task\` — Security, performance, quality, dependency audits
+- \`sdk_run_worker\` — Background workers (map, audit, optimize, testgaps)
+- \`sdk_get_metrics\` — Monitor SDK execution performance
+
+### Decision Matrix
+
+| Need | Use |
+|------|-----|
+| Spawn/manage swarm agents | MCP tools |
+| Track task status | MCP tools |
+| Persist state to memory | MCP tools |
+| Execute complex code task | SDK tools |
+| Run security audit | SDK tools |
+| Generate documentation | SDK tools |
+| Build codebase map | SDK tools (\`sdk_run_worker\`) |
+| Quality-checked output | SDK tools (iterative refinement) |
+
+**Key difference**: MCP tools manage infrastructure. SDK tools execute work with quality guarantees.
+
 ## Swarm Selection Guide
 
 Match the task type to the right swarm:
@@ -122,11 +182,22 @@ Every response must include:
 1. **Situation assessment** — What just happened, what's the current state
 2. **Actions taken** — What tools you called and why
 3. **Updated plan** — Current todo list state and next steps
-4. **Risks/blockers** — Anything that could derail execution`;
+4. **Risks/blockers** — Anything that could derail execution
+
+## Project Context
+- Project Root: \${projectRoot}
+- Always prefix file paths with the project root when displaying to user
+- Store project root in memory (namespace: 'context', key: 'project-root') on startup`;
 
 export type Provider = "anthropic" | "zai" | "openrouter" | "openai";
 
 export interface OrchestratorConfig {
+  /**
+   * REQUIRED: Absolute path to the project root directory.
+   * All tasks will be constrained to operate within this directory.
+   * Prevents cross-project confusion and scope drift.
+   */
+  projectRoot: string;
   /** LLM provider. Defaults to "zai". Options: zai, openrouter, anthropic, openai. */
   provider?: Provider;
   /** Fallback provider if primary fails auth. e.g. "openrouter". */
@@ -143,6 +214,13 @@ export interface OrchestratorConfig {
   checkpointDbPath?: string;
   /** Maximum LangGraph recursion depth. Defaults to 500. */
   recursionLimit?: number;
+  /**
+   * Enable automatic context trimming to prevent "prompt too long" errors.
+   * Defaults to true. Set to false to disable.
+   */
+  enableContextTrimming?: boolean;
+  /** Maximum context tokens (auto-detected from model if not set) */
+  maxContextTokens?: number;
 }
 
 interface ProviderSpec {
@@ -178,8 +256,8 @@ function resolveProvider(provider: Provider, config: OrchestratorConfig): Provid
     case "anthropic":
       return {
         name: "Anthropic",
-        // Supports both API key and OAuth token — SDK reads ANTHROPIC_AUTH_TOKEN automatically
-        apiKey: config.apiKey ?? process.env.ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN,
+        // Supports API key, OAuth token, or Claude Code OAuth
+        apiKey: config.apiKey ?? process.env.ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN ?? process.env.CLAUDE_CODE_OAUTH_TOKEN,
         baseUrl: undefined,
         model: config.model ?? "claude-opus-4-5-20251101",
       };
@@ -217,8 +295,9 @@ function buildLlmFromSpec(spec: ProviderSpec, provider: Provider): BaseChatModel
 }
 
 function buildLlm(config: OrchestratorConfig): { llm: BaseChatModel; providerName: string } {
+  // Default: Anthropic (Claude Agent SDK compatible), Fallback: z.ai
   const primary = config.provider ?? (process.env.LLM_PROVIDER as Provider | undefined) ?? "anthropic";
-  const fallback = config.fallbackProvider ?? (process.env.LLM_FALLBACK_PROVIDER as Provider | undefined);
+  const fallback = config.fallbackProvider ?? (process.env.LLM_FALLBACK_PROVIDER as Provider | undefined) ?? "zai";
 
   const spec = resolveProvider(primary, config);
 
@@ -244,14 +323,39 @@ function buildLlm(config: OrchestratorConfig): { llm: BaseChatModel; providerNam
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function createOrchestrator(config: OrchestratorConfig = {}): Promise<{
+export async function createOrchestrator(config: OrchestratorConfig): Promise<{
   agent: any;
   recursionLimit: number;
   providerName: string;
+  projectRoot: string;
 }> {
+  // Validate and resolve projectRoot — this is REQUIRED
+  if (!config.projectRoot) {
+    throw new Error(
+      "projectRoot is required in OrchestratorConfig.\n" +
+      "This prevents the orchestrator from operating on unintended directories.\n" +
+      "Example: createOrchestrator({ projectRoot: '/home/user/my-project' })"
+    );
+  }
+
+  const projectRoot = path.resolve(config.projectRoot);
+
+  // Verify the project root exists
+  if (!fs.existsSync(projectRoot)) {
+    throw new Error(`projectRoot does not exist: ${projectRoot}`);
+  }
+
+  if (!fs.statSync(projectRoot).isDirectory()) {
+    throw new Error(`projectRoot is not a directory: ${projectRoot}`);
+  }
+
+  // Set the global project context for path validation
+  setProjectRoot(projectRoot);
+
   const {
     workDir = "./orchestrator-workspace",
     recursionLimit = 500,
+    enableContextTrimming = true,
   } = config;
 
   // Ensure the workspace directory exists
@@ -260,17 +364,36 @@ export async function createOrchestrator(config: OrchestratorConfig = {}): Promi
   const dbPath = config.checkpointDbPath ?? path.join(workDir, "checkpoints.db");
   const checkpointer = SqliteSaver.fromConnString(dbPath);
 
-  const { llm, providerName } = buildLlm(config);
+  const { llm: baseLlm, providerName } = buildLlm(config);
+
+  // Build the system prompt with project binding
+  const systemPrompt = ORCHESTRATOR_SYSTEM_PROMPT_TEMPLATE(projectRoot);
+
+  // Optionally wrap LLM with context trimming to prevent "prompt too long" errors
+  const systemPromptTokens = estimateSystemPromptTokens(systemPrompt);
+  const llm = enableContextTrimming
+    ? createTrimmingLLM(baseLlm, {
+        model: config.model,
+        maxTokens: config.maxContextTokens,
+        systemPromptTokens,
+        verbose: true,
+      })
+    : baseLlm;
+
+  console.log(`[orchestrator] Project bound to: ${projectRoot}`);
+  if (enableContextTrimming) {
+    console.log(`[orchestrator] Context trimming enabled (system prompt: ~${systemPromptTokens} tokens)`);
+  }
 
   const agent = createDeepAgent({
     name: "swarm-orchestrator",
     model: llm,
-    systemPrompt: ORCHESTRATOR_SYSTEM_PROMPT,
+    systemPrompt,
     tools: allTools,
     subagents: allSubagents,
     backend: new FilesystemBackend({ rootDir: workDir }),
     checkpointer,
   });
 
-  return { agent, recursionLimit, providerName };
+  return { agent, recursionLimit, providerName, projectRoot };
 }
