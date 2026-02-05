@@ -16,6 +16,7 @@ import { MemoryAgent, MemoryNamespace, PatternEntry } from "./memory-agent.js";
 import { WorkerAgent, WorkerType, WorkerResult } from "./worker-agent.js";
 import { EvaluatorAgent, EvaluationResult, TaskEvaluation } from "./evaluator-agent.js";
 import { getDefaultPersistenceManager } from "../utils/persistence.js";
+import { getGlobalLogger, type TopologyChange } from "../utils/logger.js";
 
 export interface CoordinatorConfig {
   /** Enable iterative refinement for quality improvement */
@@ -83,6 +84,7 @@ export class AgentCoordinator {
   private initialized = false;
   private sessionId: string;
   private swarmId: string | null = null;
+  private logger = getGlobalLogger();
 
   constructor(config?: Partial<CoordinatorConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -113,6 +115,13 @@ export class AgentCoordinator {
       averageIterations: 0,
       patternsLearned: 0,
     };
+
+    // Log coordinator initialization
+    this.logger.log("info", "AgentCoordinator created", {
+      sessionId: this.sessionId,
+      topology: this.config.swarm.topology,
+      maxAgents: this.config.swarm.maxAgents,
+    });
   }
 
   /**
@@ -137,6 +146,25 @@ export class AgentCoordinator {
     }
 
     this.swarmId = swarmResult.swarmId;
+
+    // Log topology configuration
+    await this.logger.logTopology(
+      this.swarmId,
+      this.config.swarm.topology,
+      this.config.swarm.maxAgents,
+      0, // No agents active yet
+      [
+        {
+          type: "topology_changed",
+          timestamp: new Date().toISOString(),
+          details: {
+            oldTopology: "none",
+            newTopology: this.config.swarm.topology,
+            maxAgents: this.config.swarm.maxAgents,
+          },
+        },
+      ]
+    );
 
     // Store initialization in memory (both local and MCP)
     await this.memoryAgent.store(
@@ -238,6 +266,12 @@ export class AgentCoordinator {
 
     this.metrics.totalTasks++;
 
+    // Log topology change (agents becoming active)
+    await this.logger.logTopologyChange("configuration_changed", {
+      active: true,
+      taskType: taskConfig.type,
+    });
+
     // Step 1: Retrieve historical patterns (if enabled)
     let historicalPatterns: PatternEntry[] = [];
     if (this.config.historicalLearning.enabled) {
@@ -329,6 +363,16 @@ export class AgentCoordinator {
       if (e.recommendations.length) console.log(`Recommendations: ${e.recommendations.join(", ")}`);
     }
     console.log(`Patterns applied: ${patternIds.length}`);
+
+    // Log task completion
+    await this.logger.log("info", "Task execution completed", {
+      taskId: taskResult.taskId,
+      taskType: taskConfig.type,
+      success,
+      quality,
+      iterations,
+      patternsApplied: patternIds.length,
+    });
 
     return result;
   }

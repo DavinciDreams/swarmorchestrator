@@ -5,6 +5,7 @@
 
 import { BaseAgent, AgentConfig } from "./base-agent.js";
 import { getProjectRoot, getProjectContextString } from "../utils/project-context.js";
+import { getGlobalLogger } from "../utils/logger.js";
 
 export type WorkerType = "map" | "audit" | "optimize" | "testgaps";
 
@@ -63,12 +64,34 @@ export class WorkerAgent extends BaseAgent {
     }
 
     const path = targetPath || projectRoot;
+    const startTime = Date.now();
+
+    // Log worker start
+    await this.logger.log("info", `Worker ${this.workerConfig.workerType} starting`, {
+      workerType: this.workerConfig.workerType,
+      targetPath: path,
+      chunkSize: this.workerConfig.chunkSize,
+      maxAgents: this.workerConfig.maxAgents,
+    });
 
     const systemPrompt = this.buildSystemPrompt();
     const userPrompt = this.buildRunPrompt(path);
 
     const response = await this.executeWithContext(systemPrompt, userPrompt);
-    return this.parseWorkerResult(response);
+    const result = this.parseWorkerResult(response);
+
+    const duration = Date.now() - startTime;
+
+    // Log worker completion
+    await this.logger.log("info", `Worker ${this.workerConfig.workerType} completed`, {
+      workerType: this.workerConfig.workerType,
+      status: result.status,
+      filesProcessed: result.filesProcessed,
+      duration,
+      findingsCount: result.findings?.length || 0,
+    });
+
+    return result;
   }
 
   /**

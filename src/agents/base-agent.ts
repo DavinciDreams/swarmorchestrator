@@ -6,6 +6,7 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { getProjectRoot, isWithinProject } from "../utils/project-context.js";
 import { getDefaultPersistenceManager } from "../utils/persistence.js";
+import { getGlobalLogger, type ToolUsageLog } from "../utils/logger.js";
 
 export interface AgentConfig {
   /** Model to use: 'haiku', 'sonnet', or 'opus' */
@@ -40,6 +41,7 @@ export interface AgentResult {
 export class BaseAgent {
   protected config: AgentConfig;
   protected name: string;
+  protected logger = getGlobalLogger();
 
   constructor(name: string, config: AgentConfig = {}) {
     this.name = name;
@@ -50,6 +52,9 @@ export class BaseAgent {
       permissionMode: config.permissionMode || "bypassPermissions",
       systemPromptPrefix: config.systemPromptPrefix,
     };
+
+    // Log agent configuration
+    this.logAgentConfig();
   }
 
   /**
@@ -57,6 +62,16 @@ export class BaseAgent {
    */
   async execute(prompt: string, options?: Partial<QueryOptions>): Promise<string> {
     let result = "";
+    const executionId = `${this.name}-${Date.now()}`;
+
+    // Log execution start
+    this.logger.logExecutionStart(
+      executionId,
+      "general",
+      prompt.substring(0, 200),
+      this.name,
+      this.constructor.name
+    );
 
     const queryOptions: Record<string, unknown> = {
       allowedTools: this.config.allowedTools,
@@ -64,9 +79,44 @@ export class BaseAgent {
       ...options,
     };
 
+    const toolsUsed: ToolUsageLog[] = [];
+    let currentToolUsageId: string | null = null;
+    let currentToolName: string | null = null;
+
     try {
       for await (const message of query({ prompt, options: queryOptions })) {
-        if ("result" in message) {
+        if ("tool_use" in message) {
+          // Log tool usage start
+          const toolName = (message.tool_use as any)?.name || "unknown";
+          const toolUsageId = this.logger.logToolStart(toolName, (message.tool_use as any)?.input as Record<string, unknown>);
+
+          // Track current tool for when result arrives
+          currentToolUsageId = toolUsageId;
+          currentToolName = toolName;
+        } else if ("tool_result" in message) {
+          // Log tool usage end
+          if (currentToolUsageId && currentToolName) {
+            await this.logger.logToolEnd(
+              currentToolUsageId,
+              message.tool_result,
+              true
+            );
+
+            toolsUsed.push({
+              toolName: currentToolName,
+              startTime: "", // Will be filled by logger
+              endTime: new Date().toISOString(),
+              duration: 0, // Will be calculated by logger
+              parameters: undefined,
+              result: message.tool_result,
+              success: true,
+            });
+
+            // Clear current tool
+            currentToolUsageId = null;
+            currentToolName = null;
+          }
+        } else if ("result" in message) {
           result = message.result as string;
         } else if ("error" in message) {
           throw new Error(message.error as string);
@@ -74,8 +124,30 @@ export class BaseAgent {
       }
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : String(error);
+
+      // Log execution end with error
+      await this.logger.logExecutionEnd(
+        executionId,
+        false,
+        0,
+        "",
+        0,
+        toolsUsed,
+        errorMessage
+      );
+
       throw new Error(`[${this.name}] Agent execution failed: ${errorMessage}`);
     }
+
+    // Log execution end with success
+    await this.logger.logExecutionEnd(
+      executionId,
+      true,
+      0.7, // Default quality for base agent
+      result,
+      1,
+      toolsUsed
+    );
 
     return result;
   }
@@ -129,6 +201,25 @@ export class BaseAgent {
    */
   getConfig(): AgentConfig {
     return { ...this.config };
+  }
+
+  /**
+   * Log agent configuration
+   */
+  private async logAgentConfig(): Promise<void> {
+    await this.logger.logAgentConfig(
+      this.name,
+      this.constructor.name,
+      {
+        agentName: this.name,
+        agentType: this.constructor.name,
+        model: this.config.model || "haiku",
+        maxTokens: this.config.maxTokens || 4096,
+        allowedTools: this.config.allowedTools || [],
+        permissionMode: this.config.permissionMode || "bypassPermissions",
+        systemPromptPrefix: this.config.systemPromptPrefix,
+      }
+    );
   }
 
   // ===========================================================================
