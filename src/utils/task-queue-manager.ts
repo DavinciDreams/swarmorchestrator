@@ -143,7 +143,7 @@ export class TaskQueueManager {
       pending,
       completed,
       cancelled,
-      oldest: oldestPending ? oldestPending.toISOString() : null,
+      oldest: oldestPending ? (oldestPending as Date).toISOString() : null,
     };
   }
 

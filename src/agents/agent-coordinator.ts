@@ -58,18 +58,18 @@ export interface CoordinatorMetrics {
 
 const DEFAULT_CONFIG: CoordinatorConfig = {
   iterativeRefinement: {
-    enabled: true,
-    maxIterations: 3,
-    qualityThreshold: 0.8,
+    enabled: process.env.ITERATIVE_REFINEMENT_ENABLED !== "false",
+    maxIterations: parseInt(process.env.MAX_ITERATIONS || "1"),
+    qualityThreshold: parseFloat(process.env.QUALITY_THRESHOLD || "0.8"),
   },
   historicalLearning: {
-    enabled: true,
-    retrievalTopK: 5,
-    patternMinSuccessRate: 0.7,
+    enabled: process.env.HISTORICAL_LEARNING_ENABLED !== "false",
+    retrievalTopK: parseInt(process.env.RETRIEVAL_TOP_K || "5"),
+    patternMinSuccessRate: parseFloat(process.env.PATTERN_MIN_SUCCESS_RATE || "0.7"),
   },
   swarm: {
-    topology: "hierarchical-mesh",
-    maxAgents: 8,
+    topology: (process.env.SWARM_TOPOLOGY as any) || "hierarchical-mesh",
+    maxAgents: parseInt(process.env.SWARM_MAX_AGENTS || "8"),
   },
 };
 
