@@ -79,7 +79,7 @@ export async function initializeMcp(): Promise<Client> {
         CLAUDE_FLOW_HOOKS_ENABLED: "true",
         CLAUDE_FLOW_TOPOLOGY:
           process.env.CLAUDE_FLOW_TOPOLOGY ?? "hierarchical-mesh",
-        CLAUDE_FLOW_MAX_AGENTS: process.env.CLAUDE_FLOW_MAX_AGENTS ?? "15",
+        CLAUDE_FLOW_MAX_AGENTS: process.env.CLAUDE_FLOW_MAX_AGENTS ?? "8",
         CLAUDE_FLOW_MEMORY_BACKEND:
           process.env.CLAUDE_FLOW_MEMORY_BACKEND ?? "hybrid",
         npm_config_loglevel: "silent",

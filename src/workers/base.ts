@@ -318,7 +318,7 @@ export function estimateAgentCount(metrics: {
   const adjusted = Math.ceil(base * complexityMultiplier);
 
   // Clamp to reasonable range
-  const agents = Math.max(2, Math.min(10, adjusted));
+  const agents = Math.max(2, Math.min(8, adjusted));
 
   const reasoning = [
     fileCount > 0 ? `${fileCount} files` : null,
