@@ -9,6 +9,7 @@ import "dotenv/config";
 import { HumanMessage } from "@langchain/core/messages";
 import { createOrchestrator, type Provider } from "./orchestrator.js";
 import { disconnect, initializeMcp, isMcpEnabled } from "./mcp/client.js";
+import { initializeTaskQueueManager } from "./utils/task-queue-manager.js";
 import * as readline from "node:readline";
 import * as path from "node:path";
 
@@ -44,6 +45,18 @@ async function main() {
     } catch (err) {
       console.warn("MCP initialization failed (continuing without MCP):", err);
     }
+  }
+
+  // Initialize task queue manager and clean up stale tasks
+  console.log("Initializing task queue manager...");
+  try {
+    await initializeTaskQueueManager({
+      maxTaskAgeHours: 24, // Cancel tasks older than 24 hours
+      maxPendingTasks: 50, // Warn if queue exceeds 50 tasks
+      autoCleanupOnStartup: true,
+    });
+  } catch (err) {
+    console.warn("Task queue cleanup failed (continuing):", err);
   }
 
   // Project root is REQUIRED — defaults to current working directory

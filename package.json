@@ -14,7 +14,10 @@
     "worker:audit": "tsx src/daemon.ts run audit",
     "worker:map": "tsx src/daemon.ts run map",
     "worker:optimize": "tsx src/daemon.ts run optimize",
-    "worker:testgaps": "tsx src/daemon.ts run testgaps"
+    "worker:testgaps": "tsx src/daemon.ts run testgaps",
+    "queue:status": "tsx scripts/manage-queue.ts status",
+    "queue:clean": "tsx scripts/manage-queue.ts clean",
+    "queue:prune": "tsx scripts/manage-queue.ts prune"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.30",
