@@ -30,6 +30,8 @@ export interface ScalingConfig {
 export interface SwarmWorkerConfig {
   /** Worker name for logging */
   name: string;
+  /** Execution layer - determines which system handles this worker */
+  layer?: "mcp" | "sdk";
   /** Maximum time per chunk in ms */
   chunkTimeoutMs?: number;
   /** Maximum concurrent agents (used when scaling is disabled) */
