@@ -5,6 +5,7 @@
 
 import { BaseAgent, AgentConfig } from "./base-agent.js";
 import { getProjectContextString } from "../utils/project-context.js";
+import type { TaskType } from "./task-agent.js";
 
 export interface EvaluationCriteria {
   name: string;
@@ -27,13 +28,28 @@ export interface TaskEvaluation {
   evaluatorId: string;
 }
 
-const DEFAULT_CRITERIA: EvaluationCriteria[] = [
+/** Task types that should use document-oriented evaluation criteria */
+const DOCUMENT_TASK_TYPES: Set<string> = new Set([
+  "research", "documentation",
+]);
+
+const CODE_CRITERIA: EvaluationCriteria[] = [
   { name: "Completeness", description: "All requirements addressed", weight: 0.25 },
   { name: "Correctness", description: "Implementation is accurate", weight: 0.25 },
   { name: "Quality", description: "Code quality and best practices", weight: 0.2 },
   { name: "Security", description: "No security vulnerabilities", weight: 0.15 },
   { name: "Performance", description: "Efficient implementation", weight: 0.15 },
 ];
+
+const DOCUMENT_CRITERIA: EvaluationCriteria[] = [
+  { name: "Completeness", description: "All required topics and sections are covered", weight: 0.25 },
+  { name: "Accuracy", description: "Facts, claims, and references are correct and well-sourced", weight: 0.25 },
+  { name: "Structure", description: "Logical organization, clear headings, smooth flow between sections", weight: 0.2 },
+  { name: "Clarity", description: "Writing is clear, concise, and accessible to the target audience", weight: 0.15 },
+  { name: "Depth", description: "Sufficient analysis, synthesis, and insight beyond surface-level coverage", weight: 0.15 },
+];
+
+const DEFAULT_CRITERIA = CODE_CRITERIA;
 
 export class EvaluatorAgent extends BaseAgent {
   private criteria: EvaluationCriteria[];
@@ -51,15 +67,19 @@ export class EvaluatorAgent extends BaseAgent {
   }
 
   /**
-   * Evaluate task output against requirements
+   * Evaluate task output against requirements.
+   * When taskType is provided, criteria are automatically selected to match
+   * the output type (e.g. research/documentation use document criteria).
    */
   async evaluateTask(
     taskId: string,
     taskDescription: string,
     requirements: string[],
-    outputPath: string
+    outputPath: string,
+    taskType?: TaskType
   ): Promise<TaskEvaluation> {
-    const systemPrompt = this.buildSystemPrompt();
+    const activeCriteria = this.resolveCriteria(taskType);
+    const systemPrompt = this.buildSystemPrompt(activeCriteria, taskType);
     const userPrompt = this.buildEvaluationPrompt(taskDescription, requirements, outputPath);
 
     const response = await this.executeWithContext(systemPrompt, userPrompt);
@@ -126,22 +146,33 @@ Provide a score (0.0-1.0) and detailed feedback.`;
   }
 
   /**
-   * Generate improvement suggestions
+   * Generate improvement suggestions appropriate to the task type.
+   * For research/documentation tasks, suggestions focus on content quality
+   * rather than code quality.
    */
   async generateImprovementSuggestions(
-    evaluation: EvaluationResult
+    evaluation: EvaluationResult,
+    taskType?: TaskType
   ): Promise<string[]> {
     if (evaluation.score >= 0.9) {
       return ["Output meets quality standards. No significant improvements needed."];
     }
 
-    const systemPrompt = this.buildSystemPrompt();
+    const activeCriteria = this.resolveCriteria(taskType);
+    const systemPrompt = this.buildSystemPrompt(activeCriteria, taskType);
+
+    const contextNote = DOCUMENT_TASK_TYPES.has(taskType || "")
+      ? "This is a document/research output — suggestions must focus on content, structure, accuracy, and clarity. Do NOT suggest code changes, unit tests, input validation, security hardening, or other software engineering practices."
+      : "";
+
     const userPrompt = `Based on this evaluation, generate improvement suggestions:
 
 Score: ${evaluation.score}
 Failed Criteria: ${evaluation.failedCriteria.join(", ") || "None"}
 Feedback:
 ${evaluation.feedback.map((f) => `- ${f}`).join("\n")}
+
+${contextNote}
 
 Provide specific, actionable suggestions to address each failed criterion.
 Prioritize by impact and ease of implementation.`;
@@ -164,7 +195,26 @@ Prioritize by impact and ease of implementation.`;
     return [...this.criteria];
   }
 
-  private buildSystemPrompt(): string {
+  /**
+   * Select the right criteria set for the given task type.
+   * If custom criteria were set via setCriteria(), those always take priority.
+   * Otherwise, document task types get DOCUMENT_CRITERIA and everything else gets CODE_CRITERIA.
+   */
+  private resolveCriteria(taskType?: string): EvaluationCriteria[] {
+    // Custom criteria set by the caller always win
+    if (this.criteria !== DEFAULT_CRITERIA) {
+      return this.criteria;
+    }
+    if (taskType && DOCUMENT_TASK_TYPES.has(taskType)) {
+      return DOCUMENT_CRITERIA;
+    }
+    return CODE_CRITERIA;
+  }
+
+  private buildSystemPrompt(
+    activeCriteria?: EvaluationCriteria[],
+    taskType?: string
+  ): string {
     let projectContext = "";
     try {
       projectContext = getProjectContextString();
@@ -172,11 +222,23 @@ Prioritize by impact and ease of implementation.`;
       // Project root not set
     }
 
-    const criteriaList = this.criteria
+    const criteria = activeCriteria || this.criteria;
+    const criteriaList = criteria
       .map((c) => `- ${c.name} (${(c.weight * 100).toFixed(0)}%): ${c.description}`)
       .join("\n");
 
-    return `You are a Quality Evaluation Agent responsible for assessing task outputs and providing constructive feedback.
+    const isDocumentTask = taskType && DOCUMENT_TASK_TYPES.has(taskType);
+
+    const roleDescription = isDocumentTask
+      ? `You are a Document Quality Evaluation Agent responsible for assessing research and documentation outputs.
+
+IMPORTANT: You are evaluating a written document, NOT source code. All feedback and recommendations
+must be about the document's content, structure, accuracy, clarity, and depth. Do NOT suggest
+code-related improvements such as input validation, unit tests, error handling, security hardening,
+performance optimization, API endpoints, linting, or any software engineering practices.`
+      : `You are a Quality Evaluation Agent responsible for assessing task outputs and providing constructive feedback.`;
+
+    return `${roleDescription}
 
 ${projectContext}
 

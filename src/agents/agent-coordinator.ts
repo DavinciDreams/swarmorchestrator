@@ -3,11 +3,11 @@
  * Mirrors SunBurpBot's ImprovementCoordinator for consistent task execution
  *
  * This coordinator serves as a bridge between the DeepAgents.js orchestrator
- * and the Agent SDK agents, providing:
+ * and the execution agents, providing:
  * - Iterative refinement with quality thresholds
  * - Historical learning from past executions
  * - Swarm-based worker orchestration
- * - Persistent state via MCP memory
+ * - Persistent state via local memory
  */
 
 import { SwarmAgent, SwarmResult } from "./swarm-agent.js";
@@ -132,7 +132,7 @@ export class AgentCoordinator {
 
     console.log("[AgentCoordinator] Initializing...");
 
-    // Try to restore previous metrics from MCP memory
+    // Try to restore previous metrics from local memory
     await this.restoreMetrics();
 
     // Initialize swarm
@@ -166,7 +166,7 @@ export class AgentCoordinator {
       ]
     );
 
-    // Store initialization in memory (both local and MCP)
+    // Store initialization in local memory
     await this.memoryAgent.store(
       "coordinator-init",
       {
@@ -177,8 +177,8 @@ export class AgentCoordinator {
       "context"
     );
 
-    // Persist to MCP memory for cross-session access
-    await this.persistToMcp("coordinator_state", {
+    // Persist to local memory for cross-session access
+    await this.persistToLocal("coordinator_state", {
       sessionId: this.sessionId,
       swarmId: this.swarmId,
       config: this.config,
@@ -206,14 +206,14 @@ export class AgentCoordinator {
   /**
    * Persist data with automatic fallback to local file
    */
-  private async persistToMcp(key: string, data: Record<string, unknown>): Promise<void> {
+  private async persistToLocal(key: string, data: Record<string, unknown>): Promise<void> {
     const persistence = getDefaultPersistenceManager();
     const result = await persistence.store("sdk_coordinator", key, data);
 
     if (!result.success) {
       console.warn(`[AgentCoordinator] Failed to persist: ${result.error}`);
     } else if (result.backend === "local") {
-      console.log(`[AgentCoordinator] Persisted to local file (MCP unavailable)`);
+      console.log(`[AgentCoordinator] Persisted to local file (local file)`);
     }
   }
 
@@ -243,10 +243,10 @@ export class AgentCoordinator {
   }
 
   /**
-   * Persist current metrics to MCP memory
+   * Persist current metrics to local memory
    */
   private async persistMetrics(): Promise<void> {
-    await this.persistToMcp("coordinator_metrics", {
+    await this.persistToLocal("coordinator_metrics", {
       ...this.metrics,
       lastUpdated: new Date().toISOString(),
     });
@@ -404,12 +404,13 @@ export class AgentCoordinator {
       const dispatchResult = await this.taskAgent.dispatchTask(taskId, "parallel");
       output = dispatchResult.output || "";
 
-      // Evaluate output
+      // Evaluate output — pass taskType so the evaluator uses appropriate criteria
       lastEvaluation = await this.evaluatorAgent.evaluateTask(
         taskId,
         taskConfig.description,
         taskConfig.requirements || [],
-        output // Using output as path for simplicity
+        output, // Using output as path for simplicity
+        taskConfig.type
       );
 
       quality = lastEvaluation.evaluation.score;
@@ -424,7 +425,8 @@ export class AgentCoordinator {
       // If not last iteration, generate improvements for next round
       if (iteration < maxIterations) {
         const suggestions = await this.evaluatorAgent.generateImprovementSuggestions(
-          lastEvaluation.evaluation
+          lastEvaluation.evaluation,
+          taskConfig.type
         );
         console.log(`Improvement suggestions: ${suggestions.length}`);
 
@@ -510,7 +512,7 @@ export class AgentCoordinator {
     this.metrics.averageIterations =
       (this.metrics.averageIterations * (total - 1) + iterations) / total;
 
-    // Persist metrics to MCP memory (fire and forget)
+    // Persist metrics to local memory (fire and forget)
     this.persistMetrics().catch(() => {});
   }
 
@@ -520,11 +522,11 @@ export class AgentCoordinator {
   async shutdown(): Promise<void> {
     console.log("[AgentCoordinator] Shutting down...");
 
-    // Persist final metrics to MCP
+    // Persist final metrics
     await this.persistMetrics();
 
     // Persist shutdown state
-    await this.persistToMcp("coordinator_state", {
+    await this.persistToLocal("coordinator_state", {
       sessionId: this.sessionId,
       swarmId: this.swarmId,
       status: "shutdown",
