@@ -3,3 +3,31 @@ dist/
 orchestrator-workspace/
 *.db
 .env
+
+# Runtime state and caches
+.claude-flow/daemon-state.json
+.claude-flow/daemon.pid
+.claude-flow/.trend-cache.json
+.claude-flow/context/
+.claude-flow/metrics/
+.claude-flow/system/
+.claude-flow/tasks/
+
+# SDK execution logs and memory
+.memory/
+
+# Swarm runtime state
+.swarm/memory.db-shm
+.swarm/memory.db-wal
+.swarm/model-router-state.json
+
+# Task tracking
+.tasks/
+
+# Research outputs (optional - comment out if you want to commit research)
+research/
+research_*.md
+
+# Scripts (optional - comment out if you want to commit scripts)
+init-swarm.ts
+watch-logs.sh
