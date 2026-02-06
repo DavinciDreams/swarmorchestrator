@@ -7,9 +7,14 @@
  * - Agent configuration logging
  * - Topology tracking
  * - Performance metrics
+ * - Full task execution records (cost, tokens, model, QA, evaluation)
  */
 
 import { getDefaultPersistenceManager } from "./persistence.js";
+import { estimateTokens } from "./context-manager.js";
+import type { ExecutionMetadata } from "../agents/execution-backend.js";
+import type { EvaluationResult } from "../agents/evaluator-agent.js";
+import type { CoordinationContext } from "../agents/evaluator-agent.js";
 
 // =============================================================================
 // Log Entry Schemas
@@ -83,8 +88,93 @@ export interface PerformanceMetrics {
   averageDuration: number;
   averageQuality: number;
   totalTokensUsed: number;
+  totalCostUsd: number;
+  totalRetries: number;
   toolsUsageCount: Record<string, number>;
   agentExecutionCount: Record<string, number>;
+  modelUsageCount: Record<string, number>;
+  providerUsageCount: Record<string, number>;
+}
+
+// ---------------------------------------------------------------------------
+// Comprehensive Task Execution Record
+// ---------------------------------------------------------------------------
+
+/** QA report attached to a task execution record. */
+export interface QAReport {
+  /** Evaluation criteria used (dynamically inferred or explicit) */
+  criteriaUsed: Array<{ name: string; weight: number }>;
+  /** Per-criterion results */
+  evaluation: EvaluationResult | null;
+  /** Coordination context that shaped the evaluation */
+  coordinationContext: CoordinationContext | null;
+  /** Whether the task met the quality threshold */
+  passedQualityGate: boolean;
+  /** Quality threshold that was applied */
+  qualityThreshold: number;
+}
+
+/**
+ * Comprehensive record of a single task execution.
+ *
+ * Captures everything needed for automated metrics and validators:
+ * timing, cost, tokens, errors, retries, tool usage, model/provider,
+ * QA reports, evaluation feedback, and coordination context.
+ */
+export interface TaskExecutionRecord {
+  // --- Identity ---
+  recordId: string;
+  taskId: string;
+  sessionId: string;
+  swarmId: string | null;
+
+  // --- Timing ---
+  startTime: string;
+  endTime: string;
+  durationMs: number;
+
+  // --- Task info ---
+  taskType: string;
+  taskDescription: string;
+  requirements: string[];
+
+  // --- Agent info ---
+  agentName: string;
+  agentType: string;
+  agentReputationScore: number | null;
+
+  // --- Model & Provider ---
+  model: string;
+  provider: string;
+  backendName: string;
+
+  // --- Tokens & Cost ---
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  estimatedContextSize: number;
+  costUsd: number;
+
+  // --- Execution details ---
+  toolExecutions: ToolUsageLog[];
+  toolExecutionCount: number;
+  retries: number;
+  errors: Array<{ timestamp: string; message: string; recoverable: boolean }>;
+  errorCount: number;
+
+  // --- Outcome ---
+  success: boolean;
+  outputSize: number;
+  qualityScore: number;
+
+  // --- QA & Evaluation ---
+  qaReport: QAReport | null;
+
+  // --- Patterns ---
+  patternsApplied: string[];
+  patternLearned: boolean;
 }
 
 // =============================================================================
@@ -108,8 +198,12 @@ export class SDKLogger {
       averageDuration: 0,
       averageQuality: 0,
       totalTokensUsed: 0,
+      totalCostUsd: 0,
+      totalRetries: 0,
       toolsUsageCount: {},
       agentExecutionCount: {},
+      modelUsageCount: {},
+      providerUsageCount: {},
     };
 
     this.log("info", "SDK Logger initialized", { sessionId: this.sessionId });
@@ -187,7 +281,8 @@ export class SDKLogger {
     output: string,
     iterations: number,
     toolsUsed: ToolUsageLog[],
-    error?: string
+    error?: string,
+    metadata?: ExecutionMetadata
   ): Promise<void> {
     const tempLog = (this as any)[`temp_exec_${executionId}`] as Partial<ExecutionLog>;
 
@@ -220,8 +315,8 @@ export class SDKLogger {
     this.executionLogs.push(executionLog);
     delete (this as any)[`temp_exec_${executionId}`];
 
-    // Update performance metrics
-    this.updatePerformanceMetrics(executionLog);
+    // Update performance metrics (with metadata when available)
+    this.updatePerformanceMetrics(executionLog, metadata);
 
     // Console output
     this.consoleLog({
@@ -233,6 +328,8 @@ export class SDKLogger {
       quality,
       iterations,
       toolsUsedCount: toolsUsed.length,
+      tokens: metadata?.totalTokens,
+      costUsd: metadata?.costUsd,
     });
 
     // Persist
@@ -453,6 +550,9 @@ export class SDKLogger {
     const successRate = metrics.totalExecutions > 0
       ? (metrics.successfulExecutions / metrics.totalExecutions) * 100
       : 0;
+    const failureRate = metrics.totalExecutions > 0
+      ? (metrics.failedExecutions / metrics.totalExecutions) * 100
+      : 0;
 
     const report = `
 === SDK Swarm Execution Report ===
@@ -464,21 +564,38 @@ Total Executions: ${metrics.totalExecutions}
 Successful: ${metrics.successfulExecutions}
 Failed: ${metrics.failedExecutions}
 Success Rate: ${successRate.toFixed(2)}%
+Failure Rate: ${failureRate.toFixed(2)}%
 Average Duration: ${metrics.averageDuration.toFixed(0)}ms
 Average Quality: ${metrics.averageQuality.toFixed(2)}
+
+--- Token & Cost Metrics ---
 Total Tokens Used: ${metrics.totalTokensUsed}
+Total Cost (USD): $${metrics.totalCostUsd.toFixed(4)}
+Total Retries: ${metrics.totalRetries}
+
+--- Model Usage ---
+${Object.entries(metrics.modelUsageCount)
+  .sort(([, a], [, b]) => b - a)
+  .map(([model, count]) => `  ${model}: ${count}`)
+  .join("\n") || "  No model data"}
+
+--- Provider Usage ---
+${Object.entries(metrics.providerUsageCount)
+  .sort(([, a], [, b]) => b - a)
+  .map(([provider, count]) => `  ${provider}: ${count}`)
+  .join("\n") || "  No provider data"}
 
 --- Tools Usage ---
 ${Object.entries(metrics.toolsUsageCount)
   .sort(([, a], [, b]) => b - a)
   .map(([tool, count]) => `  ${tool}: ${count}`)
-  .join("\n")}
+  .join("\n") || "  No tool data"}
 
 --- Agent Execution Counts ---
 ${Object.entries(metrics.agentExecutionCount)
   .sort(([, a], [, b]) => b - a)
   .map(([agent, count]) => `  ${agent}: ${count}`)
-  .join("\n")}
+  .join("\n") || "  No agent data"}
 
 --- Topology ---
 ${this.topologyLogs.length > 0
@@ -566,7 +683,7 @@ ${this.executionLogs.slice(-5).map((log) => `
     }
   }
 
-  private updatePerformanceMetrics(log: ExecutionLog): void {
+  private updatePerformanceMetrics(log: ExecutionLog, metadata?: ExecutionMetadata): void {
     const metrics = this.performanceMetrics;
 
     metrics.totalExecutions++;
@@ -585,6 +702,156 @@ ${this.executionLogs.slice(-5).map((log) => `
     // Update agent execution count
     metrics.agentExecutionCount[log.agentName] =
       (metrics.agentExecutionCount[log.agentName] || 0) + 1;
+
+    // Update token, cost, retry, model, and provider metrics from metadata
+    if (metadata) {
+      const tokens = metadata.totalTokens ?? (metadata.inputTokens ?? 0) + (metadata.outputTokens ?? 0);
+      metrics.totalTokensUsed += tokens;
+      metrics.totalCostUsd += metadata.costUsd ?? 0;
+      metrics.totalRetries += metadata.retries ?? 0;
+
+      if (metadata.model) {
+        metrics.modelUsageCount[metadata.model] =
+          (metrics.modelUsageCount[metadata.model] || 0) + 1;
+      }
+      if (metadata.provider) {
+        metrics.providerUsageCount[metadata.provider] =
+          (metrics.providerUsageCount[metadata.provider] || 0) + 1;
+      }
+    }
+  }
+
+  // ===========================================================================
+  // Comprehensive Task Execution Recording
+  // ===========================================================================
+
+  /**
+   * Record a complete task execution with all available metrics.
+   *
+   * This is the primary entry point for the coordinator to persist a full
+   * execution record that automated validators and metrics pipelines can
+   * consume.
+   */
+  async recordTaskExecution(record: TaskExecutionRecord): Promise<void> {
+    // Persist the full record
+    await this.persistLog("task_executions", record.recordId, record as unknown as Record<string, unknown>);
+
+    // Also persist a lightweight summary for quick queries
+    await this.persistLog("task_summaries", record.recordId, {
+      recordId: record.recordId,
+      taskId: record.taskId,
+      taskType: record.taskType,
+      agentName: record.agentName,
+      model: record.model,
+      provider: record.provider,
+      durationMs: record.durationMs,
+      totalTokens: record.totalTokens,
+      costUsd: record.costUsd,
+      toolExecutionCount: record.toolExecutionCount,
+      retries: record.retries,
+      errorCount: record.errorCount,
+      success: record.success,
+      qualityScore: record.qualityScore,
+      passedQualityGate: record.qaReport?.passedQualityGate ?? null,
+      patternLearned: record.patternLearned,
+      timestamp: record.startTime,
+    });
+
+    this.consoleLog({
+      ...this.getMetadata("info"),
+      type: "task_execution_recorded",
+      recordId: record.recordId,
+      taskId: record.taskId,
+      durationMs: record.durationMs,
+      tokens: record.totalTokens,
+      cost: record.costUsd,
+      quality: record.qualityScore,
+      success: record.success,
+    });
+  }
+
+  /**
+   * Build a TaskExecutionRecord from component parts.
+   *
+   * Utility that merges timing, backend metadata, tool logs, evaluation
+   * results, and coordination context into a single record.  The
+   * coordinator calls this so it doesn't have to assemble the record
+   * manually.
+   */
+  buildTaskExecutionRecord(parts: {
+    taskId: string;
+    taskType: string;
+    taskDescription: string;
+    requirements: string[];
+    agentName: string;
+    agentType: string;
+    agentReputationScore: number | null;
+    startTime: string;
+    endTime: string;
+    output: string;
+    success: boolean;
+    qualityScore: number;
+    toolsUsed: ToolUsageLog[];
+    metadata: ExecutionMetadata | null;
+    errors: Array<{ timestamp: string; message: string; recoverable: boolean }>;
+    qaReport: QAReport | null;
+    patternsApplied: string[];
+    patternLearned: boolean;
+    backendName: string;
+  }): TaskExecutionRecord {
+    const durationMs = new Date(parts.endTime).getTime() - new Date(parts.startTime).getTime();
+    const meta = parts.metadata;
+
+    // Estimate tokens from prompt + output if backend didn't report them
+    const inputTokens = meta?.inputTokens ?? estimateTokens(parts.taskDescription);
+    const outputTokens = meta?.outputTokens ?? estimateTokens(parts.output);
+    const totalTokens = meta?.totalTokens ?? inputTokens + outputTokens;
+
+    return {
+      recordId: `ter-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
+      taskId: parts.taskId,
+      sessionId: this.sessionId,
+      swarmId: this.swarmId,
+
+      startTime: parts.startTime,
+      endTime: parts.endTime,
+      durationMs,
+
+      taskType: parts.taskType,
+      taskDescription: parts.taskDescription,
+      requirements: parts.requirements,
+
+      agentName: parts.agentName,
+      agentType: parts.agentType,
+      agentReputationScore: parts.agentReputationScore,
+
+      model: meta?.model ?? "unknown",
+      provider: meta?.provider ?? "unknown",
+      backendName: parts.backendName,
+
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      cacheReadTokens: meta?.cacheReadTokens ?? 0,
+      cacheCreationTokens: meta?.cacheCreationTokens ?? 0,
+      estimatedContextSize: meta?.contextWindow ?? 0,
+      costUsd: meta?.costUsd ?? 0,
+
+      toolExecutions: parts.toolsUsed,
+      toolExecutionCount: parts.toolsUsed.length,
+      retries: meta?.retries ?? 0,
+      errors: parts.errors,
+      errorCount: parts.errors.length,
+
+      success: parts.success,
+      outputSize: parts.output.length,
+      qualityScore: parts.qualityScore,
+
+      qaReport: parts.qaReport,
+
+      patternsApplied: parts.patternsApplied,
+      patternLearned: parts.patternLearned,
+    };
   }
 
   /**

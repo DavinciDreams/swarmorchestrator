@@ -26,9 +26,8 @@ let coordinator: AgentCoordinator | null = null;
 async function getCoordinator(): Promise<AgentCoordinator> {
   if (!coordinator) {
     coordinator = new AgentCoordinator({
-      iterativeRefinement: {
-        enabled: process.env.ITERATIVE_REFINEMENT_ENABLED !== "false",
-        maxIterations: parseInt(process.env.MAX_ITERATIONS || "1"),
+      evaluation: {
+        enabled: process.env.EVALUATION_ENABLED !== "false",
         qualityThreshold: parseFloat(process.env.QUALITY_THRESHOLD || "0.8"),
       },
       historicalLearning: {
@@ -339,7 +338,7 @@ export const sdkGetMetrics = tool(
   async (): Promise<string> => {
     try {
       const coord = await getCoordinator();
-      const metrics = coord.getMetrics();
+      const metrics = await coord.getMetrics();
 
       return JSON.stringify({
         success: true,
