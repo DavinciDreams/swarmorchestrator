@@ -5,7 +5,7 @@ version: "3.0.0"
 
 swarm:
   topology: hierarchical-mesh
-  maxAgents: 15
+  maxAgents: 8
   autoScale: true
   coordinationStrategy: consensus
 
@@ -25,4 +25,6 @@ hooks:
 
 mcp:
   autoStart: false
+  autoRestart: false
+  enabled: false
   port: 3000
