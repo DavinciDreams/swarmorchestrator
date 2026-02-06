@@ -8,7 +8,6 @@
 import "dotenv/config";
 import { HumanMessage } from "@langchain/core/messages";
 import { createOrchestrator, type Provider } from "./orchestrator.js";
-import { disconnect, initializeMcp, isMcpEnabled } from "./mcp/client.js";
 import { initializeTaskQueueManager } from "./utils/task-queue-manager.js";
 import * as readline from "node:readline";
 import * as path from "node:path";
@@ -28,24 +27,15 @@ function isPromptTooLongError(err: any): boolean {
 }
 
 async function main() {
+  const executionBackend = process.env.EXECUTION_BACKEND ?? "langchain";
+
   console.log("╔══════════════════════════════════════════════╗");
   console.log("║        SWARM ORCHESTRATO v1.0.0              ║");
   console.log("║   DeepAgent Swarm Orchestrator               ║");
-  console.log("║   Powered by DeepAgents.js + Claude Flow MCP ║");
+  console.log("║   Powered by DeepAgents.js                   ║");
   console.log("╚══════════════════════════════════════════════╝");
   console.log();
-
-  // Initialize MCP BEFORE readline to prevent stdio conflicts
-  // The MCP subprocess can interfere with terminal input if started mid-prompt
-  if (isMcpEnabled()) {
-    console.log("Initializing MCP connection...");
-    try {
-      await initializeMcp();
-      console.log("MCP connection established.");
-    } catch (err) {
-      console.warn("MCP initialization failed (continuing without MCP):", err);
-    }
-  }
+  console.log(`Execution backend: ${executionBackend}`);
 
   // Initialize task queue manager and clean up stale tasks
   console.log("Initializing task queue manager...");
@@ -63,13 +53,13 @@ async function main() {
   // Set ORCHESTRATOR_PROJECT_ROOT to override
   const projectRoot = path.resolve(process.env.ORCHESTRATOR_PROJECT_ROOT ?? process.cwd());
 
-  // Provider defaults: Anthropic (Agent SDK) primary, z.ai fallback
+  // Provider defaults: Anthropic primary, z.ai fallback
   const provider = (process.env.LLM_PROVIDER as Provider | undefined);
   const fallback = (process.env.LLM_FALLBACK_PROVIDER as Provider | undefined);
   const { agent, recursionLimit, providerName, projectRoot: resolvedRoot } = await createOrchestrator({
     projectRoot,
-    provider,        // Default: anthropic
-    fallbackProvider: fallback,  // Default: zai
+    provider,
+    fallbackProvider: fallback,
     workDir: process.env.ORCHESTRATOR_WORKDIR ?? "./orchestrator-workspace",
   });
 
@@ -81,7 +71,6 @@ async function main() {
   console.log(`Session: ${threadId}`);
   console.log('Commands: "exit" to quit, "reset" to start fresh session\n');
 
-  // Create readline AFTER MCP is initialized to prevent stdio conflicts
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -95,7 +84,6 @@ async function main() {
     running = false;
   });
 
-  // Ensure readline doesn't interfere with subprocess stdio
   const prompt = (question: string): Promise<string | null> => {
     if (!running) return Promise.resolve(null);
     return new Promise((resolve) => {
@@ -191,7 +179,6 @@ async function main() {
     }
   }
 
-  await disconnect();
   rl.close();
   process.exit(0);
 }

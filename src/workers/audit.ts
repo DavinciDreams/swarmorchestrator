@@ -9,7 +9,6 @@
  */
 
 import { createSwarmWorker, chunkByDirectory, type WorkerResult } from "./base.js";
-import { callMcpTool } from "../mcp/client.js";
 import { readdir, readFile } from "node:fs/promises";
 import * as path from "node:path";
 
@@ -160,25 +159,6 @@ async function analyzeChunk(
       findings.push(...checkInsecurePatterns(relativePath, lines));
     } catch {
       // Skip unreadable files
-    }
-  }
-
-  // Also dispatch to swarm agent for deeper analysis if chunk is complex
-  if (files.length > 3) {
-    const fileList = files.map((f) => path.relative(projectRoot, f)).join(", ");
-    try {
-      const result = await callMcpTool("coordination_orchestrate", {
-        task: `Analyze these files for security vulnerabilities: ${fileList}.
-               Look for: hardcoded secrets, SQL injection, XSS, command injection,
-               insecure deserialization, path traversal. Return JSON array of findings.`,
-        strategy: "parallel",
-        timeout: 60000,
-      });
-      // Parse and merge swarm findings
-      const parsed = safeParseFindings(result);
-      findings.push(...parsed);
-    } catch {
-      // Continue with static analysis results
     }
   }
 

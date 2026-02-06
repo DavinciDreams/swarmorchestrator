@@ -1,11 +1,15 @@
 /**
  * Agent exports
- * Mirrors SunBurpBot's agent architecture for consistent SDK usage
  */
 
 // Base agent
 export { BaseAgent } from "./base-agent.js";
 export type { AgentConfig, QueryOptions, AgentMessage, AgentResult } from "./base-agent.js";
+
+// Execution backend
+export type { ExecutionBackend, ExecutionMessage, ExecutionOptions } from "./execution-backend.js";
+export { createExecutionBackend } from "./backends/index.js";
+export type { BackendType, BackendConfig } from "./backends/index.js";
 
 // Specialized agents
 export { SwarmAgent } from "./swarm-agent.js";

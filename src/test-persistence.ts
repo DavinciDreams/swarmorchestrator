@@ -1,16 +1,11 @@
 /**
- * Test script to verify persistence fallback system
+ * Test script to verify persistence system
  */
 
 import { PersistenceManager } from "./utils/persistence.js";
-import { disableMcp } from "./mcp/client.js";
 
 async function testPersistence() {
   console.log("=== Testing Persistence System ===\n");
-
-  // Disable MCP to test local fallback
-  disableMcp();
-  console.log("✓ MCP disabled - will use local file storage\n");
 
   const persistence = new PersistenceManager({
     localStorageDir: "./.memory",
@@ -52,7 +47,7 @@ async function testPersistence() {
       value: `Entry number ${i}`,
     });
   }
-  console.log("  ✓ Stored 5 entries\n");
+  console.log("  Stored 5 entries\n");
 
   // Test 4: List all keys
   console.log("Test 4: Listing all keys...");
@@ -64,7 +59,7 @@ async function testPersistence() {
   // Test 5: Get statistics
   console.log("Test 5: Storage statistics...");
   const stats = await persistence.getStats();
-  console.log(`  MCP Enabled: ${stats.mcpEnabled}`);
+  console.log(`  Backend: ${stats.backend}`);
   console.log(`  Local Storage Dir: ${stats.localStorageDir}`);
   console.log(`  Namespaces:`);
   for (const ns of stats.namespaces) {
@@ -82,7 +77,7 @@ async function testPersistence() {
     patternsLearned: 5,
     lastUpdated: new Date().toISOString(),
   });
-  console.log(`  ✓ Metrics persisted to ${metricsResult.backend} storage\n`);
+  console.log(`  Metrics persisted to ${metricsResult.backend} storage\n`);
 
   // Test 7: Retrieve coordinator metrics
   console.log("Test 7: Retrieving coordinator metrics...");
@@ -94,8 +89,8 @@ async function testPersistence() {
   }
 
   console.log("\n=== All Tests Complete ===");
-  console.log("✓ Persistence system is working correctly!");
-  console.log("✓ Data will automatically fall back to local files when MCP is unavailable");
+  console.log("Persistence system is working correctly!");
+  console.log("Data stored in local files at ./.memory/");
 }
 
 // Run tests

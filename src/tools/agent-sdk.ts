@@ -14,7 +14,7 @@ import { z } from "zod";
 import { AgentCoordinator, CoordinatedTaskResult } from "../agents/agent-coordinator.js";
 import { TaskConfig, TaskType } from "../agents/task-agent.js";
 import { WorkerType } from "../agents/worker-agent.js";
-import { callMcpTool } from "../mcp/client.js";
+import { getDefaultPersistenceManager } from "../utils/persistence.js";
 import { getProjectRoot } from "../utils/project-context.js";
 
 // Singleton coordinator instance
@@ -294,12 +294,9 @@ export const sdkRunWorker = tool(
 
       const result = await coord.runWorker(workerType as WorkerType, fullPath);
 
-      // Persist result to memory
-      await callMcpTool("memory_store", {
-        namespace: "workers",
-        key: `${workerType}-${Date.now()}`,
-        value: JSON.stringify(result),
-      });
+      // Persist result to local memory
+      const persistence = getDefaultPersistenceManager();
+      await persistence.store("workers", `${workerType}-${Date.now()}`, result as unknown as Record<string, unknown>, ["worker-result", workerType]);
 
       return JSON.stringify(result);
     } catch (error: unknown) {

@@ -8,7 +8,7 @@
  * 4. Handle failures gracefully
  */
 
-import { callMcpTool } from "../mcp/client.js";
+import { getDefaultPersistenceManager } from "../utils/persistence.js";
 
 export interface ScalingConfig {
   /** Enable dynamic scaling based on task size */
@@ -30,8 +30,8 @@ export interface ScalingConfig {
 export interface SwarmWorkerConfig {
   /** Worker name for logging */
   name: string;
-  /** Execution layer - determines which system handles this worker */
-  layer?: "mcp" | "sdk";
+  /** Execution layer */
+  layer?: "sdk";
   /** Maximum time per chunk in ms */
   chunkTimeoutMs?: number;
   /** Maximum concurrent agents (used when scaling is disabled) */
@@ -158,24 +158,16 @@ export async function createSwarmWorker(config: SwarmWorkerConfig) {
     },
 
     /**
-     * Initialize a swarm for this worker
-     * Uses maxAgents from scaling config to allow dynamic growth
+     * Initialize a swarm for this worker (local ID generation)
      */
     async initSwarm(): Promise<string> {
-      const result = await callMcpTool("swarm_init", {
-        topology,
-        maxAgents: scaling.maxAgents,
-        config: {
-          name: `${name}-swarm`,
-          workerType: name,
-          scalingEnabled: scaling.enabled,
-        },
-      });
-      return JSON.parse(result).swarmId ?? `swarm-${name}`;
+      const swarmId = `swarm-${name}-${Date.now()}`;
+      console.log(`[${name}] Initialized local swarm: ${swarmId} (topology=${topology}, maxAgents=${scaling.maxAgents})`);
+      return swarmId;
     },
 
     /**
-     * Spawn agents for chunk processing
+     * Spawn agents for chunk processing (local ID generation)
      */
     async spawnAgents(
       swarmId: string,
@@ -184,16 +176,9 @@ export async function createSwarmWorker(config: SwarmWorkerConfig) {
     ): Promise<string[]> {
       const agentIds: string[] = [];
       for (let i = 0; i < count; i++) {
-        const result = await callMcpTool("agent_spawn", {
-          agentType: "worker",
-          agentId: `${name}-agent-${i}`,
-          task: role,
-          model,
-          config: { swarmId },
-        });
-        const parsed = JSON.parse(result);
-        agentIds.push(parsed.agentId ?? `${name}-agent-${i}`);
+        agentIds.push(`${name}-agent-${i}`);
       }
+      console.log(`[${name}] Spawned ${count} local agents for role: ${role}`);
       return agentIds;
     },
 
@@ -269,34 +254,23 @@ export async function createSwarmWorker(config: SwarmWorkerConfig) {
       taskSize?: number,
     ): Promise<string> {
       const { concurrency } = calculateOptimalConcurrency(taskSize ?? 10, scaling);
-      return callMcpTool("coordination_orchestrate", {
-        task,
-        strategy,
-        agents: concurrency,
-        timeout: chunkTimeoutMs * concurrency,
-      });
+      console.log(`[${name}] Dispatching task (strategy=${strategy}, agents=${concurrency}): ${task.substring(0, 100)}...`);
+      return JSON.stringify({ status: "dispatched", strategy, agents: concurrency });
     },
 
     /**
      * Store results in memory for persistence
      */
     async storeResults(key: string, data: unknown): Promise<void> {
-      await callMcpTool("memory_store", {
-        key,
-        value: JSON.stringify(data),
-        namespace: `worker-${name}`,
-        tags: ["worker-result", name],
-      });
+      const persistence = getDefaultPersistenceManager();
+      await persistence.store(`worker-${name}`, key, data as Record<string, unknown>, ["worker-result", name]);
     },
 
     /**
      * Shutdown the swarm gracefully
      */
     async shutdown(swarmId: string): Promise<void> {
-      await callMcpTool("swarm_shutdown", {
-        swarmId,
-        graceful: true,
-      });
+      console.log(`[${name}] Shutting down swarm: ${swarmId}`);
     },
   };
 }

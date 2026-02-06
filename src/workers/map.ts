@@ -8,7 +8,6 @@
  */
 
 import { createSwarmWorker, chunkByDirectory } from "./base.js";
-import { callMcpTool } from "../mcp/client.js";
 import * as fs from "node:fs";
 import { readdir, readFile, mkdir, writeFile } from "node:fs/promises";
 import * as path from "node:path";

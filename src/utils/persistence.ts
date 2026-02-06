@@ -1,26 +1,21 @@
 /**
  * Robust Persistence Utility
  *
- * Provides automatic fallback from MCP to local file storage.
- * Ensures data is never lost due to MCP connectivity issues.
+ * Local file-based storage for all persistent state.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { callMcpTool, isMcpEnabled } from "../mcp/client.js";
 
 export interface PersistenceConfig {
   /** Base directory for local file storage */
   localStorageDir?: string;
-  /** Whether to try MCP first */
-  tryMcpFirst?: boolean;
-  /** Whether to log fallback events */
+  /** Whether to log storage events */
   verbose?: boolean;
 }
 
 const DEFAULT_CONFIG: Required<PersistenceConfig> = {
   localStorageDir: path.join(process.cwd(), ".memory"),
-  tryMcpFirst: true,
   verbose: true,
 };
 
@@ -34,34 +29,14 @@ export class PersistenceManager {
   }
 
   /**
-   * Store data with automatic fallback to local file
+   * Store data to local file storage
    */
   async store(
     namespace: string,
     key: string,
     data: Record<string, unknown>,
     tags?: string[]
-  ): Promise<{ success: boolean; backend: "mcp" | "local"; error?: string }> {
-    // Try MCP first if enabled
-    if (this.config.tryMcpFirst && isMcpEnabled()) {
-      try {
-        await callMcpTool("memory_store", {
-          namespace,
-          key,
-          value: JSON.stringify(data),
-          tags,
-        });
-        return { success: true, backend: "mcp" };
-      } catch (error: unknown) {
-        const msg = error instanceof Error ? error.message : String(error);
-        if (this.config.verbose) {
-          console.warn(`[Persistence] MCP store failed: ${msg}, falling back to local file`);
-        }
-        // Fall through to local storage
-      }
-    }
-
-    // Fallback to local file storage
+  ): Promise<{ success: boolean; backend: "local"; error?: string }> {
     try {
       await this.storeLocal(namespace, key, data, tags);
       return { success: true, backend: "local" };
@@ -73,31 +48,12 @@ export class PersistenceManager {
   }
 
   /**
-   * Retrieve data with automatic fallback to local file
+   * Retrieve data from local file storage
    */
   async retrieve(
     namespace: string,
     key: string
-  ): Promise<{ success: boolean; data?: Record<string, unknown>; backend: "mcp" | "local"; error?: string }> {
-    // Try MCP first if enabled
-    if (this.config.tryMcpFirst && isMcpEnabled()) {
-      try {
-        const result = await callMcpTool("memory_retrieve", { namespace, key });
-        const parsed = JSON.parse(result);
-        if (parsed && typeof parsed === "object" && !parsed.status) {
-          return { success: true, data: parsed, backend: "mcp" };
-        }
-        // Fall through to local storage if MCP returns error status
-      } catch (error: unknown) {
-        if (this.config.verbose) {
-          const msg = error instanceof Error ? error.message : String(error);
-          console.warn(`[Persistence] MCP retrieve failed: ${msg}, trying local file`);
-        }
-        // Fall through to local storage
-      }
-    }
-
-    // Fallback to local file storage
+  ): Promise<{ success: boolean; data?: Record<string, unknown>; backend: "local"; error?: string }> {
     try {
       const data = await this.retrieveLocal(namespace, key);
       return { success: true, data, backend: "local" };
@@ -156,21 +112,7 @@ export class PersistenceManager {
   /**
    * List all keys in a namespace
    */
-  async list(namespace: string): Promise<{ keys: string[]; backend: "mcp" | "local" }> {
-    // Try MCP first if enabled
-    if (this.config.tryMcpFirst && isMcpEnabled()) {
-      try {
-        const result = await callMcpTool("memory_list", { namespace });
-        const parsed = JSON.parse(result);
-        if (Array.isArray(parsed)) {
-          return { keys: parsed, backend: "mcp" };
-        }
-      } catch {
-        // Fall through to local storage
-      }
-    }
-
-    // Fallback to local file storage
+  async list(namespace: string): Promise<{ keys: string[]; backend: "local" }> {
     const namespaceDir = path.join(this.config.localStorageDir, namespace);
     if (!fs.existsSync(namespaceDir)) {
       return { keys: [], backend: "local" };
@@ -216,7 +158,7 @@ export class PersistenceManager {
    * Get storage statistics
    */
   async getStats(): Promise<{
-    mcpEnabled: boolean;
+    backend: "local";
     localStorageDir: string;
     namespaces: Array<{ name: string; keyCount: number }>;
   }> {
@@ -236,7 +178,7 @@ export class PersistenceManager {
     }
 
     return {
-      mcpEnabled: isMcpEnabled(),
+      backend: "local",
       localStorageDir: this.config.localStorageDir,
       namespaces,
     };

@@ -1,12 +1,15 @@
 /**
- * Base agent class wrapping Claude Agent SDK
- * Mirrors the SunBurpBot agent architecture for consistent SDK usage
+ * Base agent class with pluggable execution backend
+ *
+ * Supports both Agent SDK (Claude-native) and LangChain (any provider) backends.
+ * Backend is selected via EXECUTION_BACKEND env var or config.
  */
 
-import { query } from "@anthropic-ai/claude-agent-sdk";
 import { getProjectRoot, isWithinProject } from "../utils/project-context.js";
 import { getDefaultPersistenceManager } from "../utils/persistence.js";
 import { getGlobalLogger, type ToolUsageLog } from "../utils/logger.js";
+import { createExecutionBackend, type BackendConfig } from "./backends/index.js";
+import type { ExecutionBackend } from "./execution-backend.js";
 
 export interface AgentConfig {
   /** Model to use: 'haiku', 'sonnet', or 'opus' */
@@ -19,6 +22,10 @@ export interface AgentConfig {
   permissionMode?: "ask" | "bypassPermissions";
   /** Optional system prompt prefix */
   systemPromptPrefix?: string;
+  /** Inject a specific execution backend */
+  backend?: ExecutionBackend;
+  /** Backend configuration (used if backend not provided) */
+  backendConfig?: BackendConfig;
 }
 
 export interface QueryOptions {
@@ -42,6 +49,7 @@ export class BaseAgent {
   protected config: AgentConfig;
   protected name: string;
   protected logger = getGlobalLogger();
+  protected backend: ExecutionBackend;
 
   constructor(name: string, config: AgentConfig = {}) {
     this.name = name;
@@ -52,6 +60,9 @@ export class BaseAgent {
       permissionMode: config.permissionMode || "bypassPermissions",
       systemPromptPrefix: config.systemPromptPrefix,
     };
+
+    // Initialize execution backend
+    this.backend = config.backend ?? createExecutionBackend(config.backendConfig);
 
     // Log agent configuration
     this.logAgentConfig();
@@ -84,21 +95,26 @@ export class BaseAgent {
     let currentToolName: string | null = null;
 
     try {
-      for await (const message of query({ prompt, options: queryOptions })) {
-        if ("tool_use" in message) {
+      for await (const message of this.backend.execute(prompt, {
+        allowedTools: queryOptions.allowedTools as string[] | undefined,
+        permissionMode: queryOptions.permissionMode as "ask" | "bypassPermissions" | undefined,
+        ...queryOptions,
+      })) {
+        if (message.type === "tool_use") {
           // Log tool usage start
-          const toolName = (message.tool_use as any)?.name || "unknown";
-          const toolUsageId = this.logger.logToolStart(toolName, (message.tool_use as any)?.input as Record<string, unknown>);
+          const toolContent = message.content as any;
+          const toolName = toolContent?.name || "unknown";
+          const toolUsageId = this.logger.logToolStart(toolName, toolContent?.input as Record<string, unknown>);
 
           // Track current tool for when result arrives
           currentToolUsageId = toolUsageId;
           currentToolName = toolName;
-        } else if ("tool_result" in message) {
+        } else if (message.type === "tool_result") {
           // Log tool usage end
           if (currentToolUsageId && currentToolName) {
             await this.logger.logToolEnd(
               currentToolUsageId,
-              message.tool_result,
+              message.content,
               true
             );
 
@@ -108,7 +124,7 @@ export class BaseAgent {
               endTime: new Date().toISOString(),
               duration: 0, // Will be calculated by logger
               parameters: undefined,
-              result: message.tool_result,
+              result: message.content,
               success: true,
             });
 
@@ -116,10 +132,10 @@ export class BaseAgent {
             currentToolUsageId = null;
             currentToolName = null;
           }
-        } else if ("result" in message) {
-          result = message.result as string;
-        } else if ("error" in message) {
-          throw new Error(message.error as string);
+        } else if (message.type === "result") {
+          result = message.content as string;
+        } else if (message.type === "error") {
+          throw new Error(message.content as string);
         }
       }
     } catch (error: unknown) {
@@ -241,7 +257,7 @@ export class BaseAgent {
     if (!result.success) {
       console.warn(`[${this.name}] Failed to persist state: ${result.error}`);
     } else if (result.backend === "local") {
-      console.log(`[${this.name}] Persisted state to local file (MCP unavailable)`);
+      console.log(`[${this.name}] Persisted state to local file`);
     }
   }
 

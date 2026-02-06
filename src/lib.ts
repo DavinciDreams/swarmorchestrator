@@ -16,12 +16,12 @@
  */
 
 export { createOrchestrator } from "./orchestrator.js";
-export type { OrchestratorConfig, Provider } from "./orchestrator.js";
+export type { OrchestratorConfig } from "./orchestrator.js";
+export type { Provider } from "./utils/provider.js";
 export { allTools } from "./tools/index.js";
 export { allSubagents } from "./subagents/index.js";
-export { getClient, callMcpTool, disconnect } from "./mcp/client.js";
 
-// Agent SDK exports (mirrors SunBurpBot architecture)
+// Agent SDK exports
 export {
   BaseAgent,
   SwarmAgent,
@@ -57,6 +57,16 @@ export type {
   CoordinatedTaskResult,
   CoordinatorMetrics,
 } from "./agents/index.js";
+
+// Execution backend exports
+export type {
+  ExecutionBackend,
+  ExecutionMessage,
+  ExecutionOptions,
+  BackendType,
+  BackendConfig,
+} from "./agents/index.js";
+export { createExecutionBackend } from "./agents/index.js";
 
 // Project context utilities
 export {
