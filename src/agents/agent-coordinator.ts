@@ -1,10 +1,11 @@
 /**
  * Agent Coordinator - Orchestrates multiple specialized agents
- * Mirrors SunBurpBot's ImprovementCoordinator for consistent task execution
  *
  * This coordinator serves as a bridge between the DeepAgents.js orchestrator
  * and the execution agents, providing:
- * - Iterative refinement with quality thresholds
+ * - Single-pass execution with coordination-aware evaluation
+ * - Dynamic evaluation criteria inferred from output format
+ * - Reputation & pattern context fed into evaluator feedback
  * - Historical learning from past executions
  * - Swarm-based worker orchestration
  * - Persistent state via local memory
@@ -14,15 +15,16 @@ import { SwarmAgent, SwarmResult } from "./swarm-agent.js";
 import { TaskAgent, TaskConfig, TaskResult, TaskDecomposition } from "./task-agent.js";
 import { MemoryAgent, MemoryNamespace, PatternEntry } from "./memory-agent.js";
 import { WorkerAgent, WorkerType, WorkerResult } from "./worker-agent.js";
-import { EvaluatorAgent, EvaluationResult, TaskEvaluation } from "./evaluator-agent.js";
+import { EvaluatorAgent, EvaluationResult, TaskEvaluation, CoordinationContext } from "./evaluator-agent.js";
+import { ReputationManager, ReputationSummary } from "./reputation.js";
 import { getDefaultPersistenceManager } from "../utils/persistence.js";
-import { getGlobalLogger, type TopologyChange } from "../utils/logger.js";
+import { getGlobalLogger, type TopologyChange, type QAReport, type TaskExecutionRecord } from "../utils/logger.js";
+import type { EvaluationCriteria } from "./evaluator-agent.js";
 
 export interface CoordinatorConfig {
-  /** Enable iterative refinement for quality improvement */
-  iterativeRefinement: {
+  /** Quality evaluation settings (single-pass, no iteration) */
+  evaluation: {
     enabled: boolean;
-    maxIterations: number;
     qualityThreshold: number;
   };
   /** Enable historical learning from past tasks */
@@ -52,14 +54,13 @@ export interface CoordinatorMetrics {
   totalTasks: number;
   successfulTasks: number;
   averageQuality: number;
-  averageIterations: number;
   patternsLearned: number;
+  reputationScores?: ReputationSummary[];
 }
 
 const DEFAULT_CONFIG: CoordinatorConfig = {
-  iterativeRefinement: {
-    enabled: process.env.ITERATIVE_REFINEMENT_ENABLED !== "false",
-    maxIterations: parseInt(process.env.MAX_ITERATIONS || "1"),
+  evaluation: {
+    enabled: process.env.EVALUATION_ENABLED !== "false",
     qualityThreshold: parseFloat(process.env.QUALITY_THRESHOLD || "0.8"),
   },
   historicalLearning: {
@@ -79,6 +80,7 @@ export class AgentCoordinator {
   private taskAgent: TaskAgent;
   private memoryAgent: MemoryAgent;
   private evaluatorAgent: EvaluatorAgent;
+  private reputationManager: ReputationManager;
   private workerAgents: Map<WorkerType, WorkerAgent>;
   private metrics: CoordinatorMetrics;
   private initialized = false;
@@ -98,6 +100,7 @@ export class AgentCoordinator {
     this.taskAgent = new TaskAgent();
     this.memoryAgent = new MemoryAgent();
     this.evaluatorAgent = new EvaluatorAgent();
+    this.reputationManager = new ReputationManager();
 
     // Initialize worker agents
     this.workerAgents = new Map<WorkerType, WorkerAgent>([
@@ -112,7 +115,6 @@ export class AgentCoordinator {
       totalTasks: 0,
       successfulTasks: 0,
       averageQuality: 0,
-      averageIterations: 0,
       patternsLearned: 0,
     };
 
@@ -232,7 +234,6 @@ export class AgentCoordinator {
         totalTasks: typeof parsed.totalTasks === "number" ? parsed.totalTasks : this.metrics.totalTasks,
         successfulTasks: typeof parsed.successfulTasks === "number" ? parsed.successfulTasks : this.metrics.successfulTasks,
         averageQuality: typeof parsed.averageQuality === "number" ? parsed.averageQuality : this.metrics.averageQuality,
-        averageIterations: typeof parsed.averageIterations === "number" ? parsed.averageIterations : this.metrics.averageIterations,
         patternsLearned: typeof parsed.patternsLearned === "number" ? parsed.patternsLearned : this.metrics.patternsLearned,
       };
       console.log(`[AgentCoordinator] Restored metrics from ${result.backend} storage`);
@@ -259,6 +260,9 @@ export class AgentCoordinator {
     if (!this.initialized) {
       await this.initialize();
     }
+
+    const startTime = new Date().toISOString();
+    const executionErrors: Array<{ timestamp: string; message: string; recoverable: boolean }> = [];
 
     console.log("\n=== Task Execution ===");
     console.log(`Task: ${taskConfig.description}`);
@@ -298,163 +302,181 @@ export class AgentCoordinator {
     }
     console.log(`Task created: ${taskResult.taskId}`);
 
-    // Step 3: Execute with iterative refinement
-    let output = "";
-    let quality = 0;
-    let iterations = 0;
-    let evaluation: TaskEvaluation | undefined;
-
-    if (this.config.iterativeRefinement.enabled) {
-      console.log("Dispatching with iterative refinement...");
-      const refinementResult = await this.executeWithRefinement(
-        taskResult.taskId,
-        taskConfig,
-        historicalPatterns
+    // Step 2b: Reputation-influenced routing
+    if (taskConfig.assignTo && taskConfig.assignTo.length > 1) {
+      taskConfig.assignTo = await this.reputationManager.selectAgent(
+        taskConfig.assignTo,
+        taskConfig.priority
       );
-      output = refinementResult.output;
-      quality = refinementResult.quality;
-      iterations = refinementResult.iterations;
-      evaluation = refinementResult.evaluation;
-    } else {
-      console.log("Dispatching (single pass)...");
-      const dispatchResult = await this.taskAgent.dispatchTask(taskResult.taskId, "parallel");
-      output = dispatchResult.output || "";
-      quality = 0.7; // Default quality without evaluation
-      iterations = 1;
     }
+
+    // Step 3: Single-pass execution + coordination-aware evaluation
+    console.log("Dispatching task...");
+    const dispatchResult = await this.taskAgent.dispatchTask(taskResult.taskId, "parallel");
+    const output = dispatchResult.output || "";
+    let quality = 0;
+    let evaluation: TaskEvaluation | undefined;
+    let coordinationCtx: CoordinationContext | null = null;
+    let criteriaUsed: EvaluationCriteria[] = [];
+    const executingAgent = taskConfig.assignTo?.[0] ?? `${taskConfig.type}-agent`;
+    const agentReputationScore = await this.reputationManager.getScore(executingAgent);
+
+    if (this.config.evaluation.enabled) {
+      // Build coordination context for the evaluator
+      coordinationCtx = {
+        agentReputationScore,
+        appliedPatterns: historicalPatterns.map((p) => p.description ?? p.id),
+        coordinatorRecommendations: this.buildCoordinatorRecommendations(
+          agentReputationScore,
+          historicalPatterns
+        ),
+      };
+
+      try {
+        evaluation = await this.evaluatorAgent.evaluateTask(
+          taskResult.taskId,
+          taskConfig.description,
+          taskConfig.requirements || [],
+          output,
+          taskConfig.type,
+          coordinationCtx
+        );
+        quality = evaluation.evaluation.score;
+        // Capture what criteria were actually used
+        criteriaUsed = this.evaluatorAgent.getCriteriaOverride() ?? [];
+      } catch (evalError: unknown) {
+        const msg = evalError instanceof Error ? evalError.message : String(evalError);
+        executionErrors.push({ timestamp: new Date().toISOString(), message: `Evaluation failed: ${msg}`, recoverable: true });
+        quality = 0.7; // Fallback
+      }
+    } else {
+      quality = 0.7; // Default quality without evaluation
+    }
+
+    const endTime = new Date().toISOString();
 
     console.log("\n--- Execution Result ---");
     console.log(`Task ID: ${taskResult.taskId}`);
-    console.log(`Iterations: ${iterations}`);
     console.log(`Output length: ${output.length} chars`);
 
-    // Step 4: Record execution and learn patterns
+    // Step 4: Record reputation outcome
+    await this.reputationManager.recordOutcome(executingAgent, taskResult.taskId, quality);
+
+    // Step 5: Record execution and learn patterns
     const patternIds = historicalPatterns.map((p) => p.id);
+    let patternLearned = false;
 
     if (this.config.historicalLearning.enabled && quality >= this.config.historicalLearning.patternMinSuccessRate) {
-      await this.recordTaskExecution(taskConfig, output, quality, iterations, patternIds);
+      patternLearned = await this.recordTaskExecution(taskConfig, output, quality, patternIds);
     }
 
-    // Step 5: Update metrics
-    const success = quality >= this.config.iterativeRefinement.qualityThreshold;
+    // Step 6: Update metrics
+    const success = quality >= this.config.evaluation.qualityThreshold;
     if (success) {
       this.metrics.successfulTasks++;
     }
-    this.updateMetrics(quality, iterations);
+    this.updateMetrics(quality);
 
-    // Step 6: Build result
+    // Step 7: Build QA report
+    const qaReport: QAReport = {
+      criteriaUsed: criteriaUsed.map((c) => ({ name: c.name, weight: c.weight })),
+      evaluation: evaluation?.evaluation ?? null,
+      coordinationContext: coordinationCtx,
+      passedQualityGate: success,
+      qualityThreshold: this.config.evaluation.qualityThreshold,
+    };
+
+    // Step 8: Build & persist comprehensive TaskExecutionRecord
+    const execRecord = this.logger.buildTaskExecutionRecord({
+      taskId: taskResult.taskId,
+      taskType: taskConfig.type,
+      taskDescription: taskConfig.description,
+      requirements: taskConfig.requirements || [],
+      agentName: executingAgent,
+      agentType: taskConfig.type,
+      agentReputationScore,
+      startTime,
+      endTime,
+      output,
+      success,
+      qualityScore: quality,
+      toolsUsed: [],  // Tool details captured at the agent level via logger
+      metadata: null,  // Will be populated when backends emit metadata messages
+      errors: executionErrors,
+      qaReport,
+      patternsApplied: patternIds,
+      patternLearned,
+      backendName: this.taskAgent.getBackendName(),
+    });
+
+    await this.logger.recordTaskExecution(execRecord);
+
+    // Step 9: Build result
     const result: CoordinatedTaskResult = {
       success,
       taskId: taskResult.taskId,
       output,
       quality,
-      iterations,
+      iterations: 1,
       patterns: patternIds,
       evaluation,
     };
 
     console.log("\n--- Evaluation Result ---");
-    console.log(`Quality: ${result.quality.toFixed(2)} (threshold: ${this.config.iterativeRefinement.qualityThreshold})`);
+    console.log(`Quality: ${result.quality.toFixed(2)} (threshold: ${this.config.evaluation.qualityThreshold})`);
     console.log(`Passed: ${result.success}`);
     if (evaluation?.evaluation) {
       const e = evaluation.evaluation;
-      if (e.passedCriteria.length) console.log(`Passed: ${e.passedCriteria.join(", ")}`);
-      if (e.failedCriteria.length) console.log(`Failed: ${e.failedCriteria.join(", ")}`);
+      if (e.passedCriteria.length) console.log(`Passed criteria: ${e.passedCriteria.join(", ")}`);
+      if (e.failedCriteria.length) console.log(`Failed criteria: ${e.failedCriteria.join(", ")}`);
       if (e.recommendations.length) console.log(`Recommendations: ${e.recommendations.join(", ")}`);
     }
     console.log(`Patterns applied: ${patternIds.length}`);
-
-    // Log task completion
-    await this.logger.log("info", "Task execution completed", {
-      taskId: taskResult.taskId,
-      taskType: taskConfig.type,
-      success,
-      quality,
-      iterations,
-      patternsApplied: patternIds.length,
-    });
 
     return result;
   }
 
   /**
-   * Execute with iterative refinement
+   * Build coordinator-level recommendations for the evaluator based on
+   * the executing agent's reputation and historical patterns.
    */
-  private async executeWithRefinement(
-    taskId: string,
-    taskConfig: TaskConfig,
+  private buildCoordinatorRecommendations(
+    reputationScore: number,
     patterns: PatternEntry[]
-  ): Promise<{
-    output: string;
-    quality: number;
-    iterations: number;
-    evaluation?: TaskEvaluation;
-  }> {
-    const maxIterations = this.config.iterativeRefinement.maxIterations;
-    const qualityThreshold = this.config.iterativeRefinement.qualityThreshold;
+  ): string[] {
+    const recs: string[] = [];
 
-    let output = "";
-    let quality = 0;
-    let lastEvaluation: TaskEvaluation | undefined;
-
-    for (let iteration = 1; iteration <= maxIterations; iteration++) {
-      console.log(`\n--- Iteration ${iteration}/${maxIterations} ---`);
-
-      // Dispatch task
-      const dispatchResult = await this.taskAgent.dispatchTask(taskId, "parallel");
-      output = dispatchResult.output || "";
-
-      // Evaluate output — pass taskType so the evaluator uses appropriate criteria
-      lastEvaluation = await this.evaluatorAgent.evaluateTask(
-        taskId,
-        taskConfig.description,
-        taskConfig.requirements || [],
-        output, // Using output as path for simplicity
-        taskConfig.type
-      );
-
-      quality = lastEvaluation.evaluation.score;
-      console.log(`Quality: ${quality.toFixed(2)}`);
-
-      // Check if quality threshold met
-      if (quality >= qualityThreshold) {
-        console.log(`Quality threshold (${qualityThreshold}) met!`);
-        return { output, quality, iterations: iteration, evaluation: lastEvaluation };
-      }
-
-      // If not last iteration, generate improvements for next round
-      if (iteration < maxIterations) {
-        const suggestions = await this.evaluatorAgent.generateImprovementSuggestions(
-          lastEvaluation.evaluation,
-          taskConfig.type
-        );
-        console.log(`Improvement suggestions: ${suggestions.length}`);
-
-        // Store feedback for next iteration
-        await this.memoryAgent.store(
-          `feedback-${taskId}-${iteration}`,
-          {
-            evaluation: lastEvaluation.evaluation,
-            suggestions,
-          },
-          "progress"
-        );
-      }
+    if (reputationScore < 0.5) {
+      recs.push("Agent has low reputation — verify correctness and completeness carefully.");
+    } else if (reputationScore < 0.7) {
+      recs.push("Agent reputation is moderate — check edge cases and requirement coverage.");
     }
 
-    return { output, quality, iterations: maxIterations, evaluation: lastEvaluation };
+    if (patterns.length > 0) {
+      const highQuality = patterns.filter((p) => p.successRate >= 0.9);
+      if (highQuality.length > 0) {
+        recs.push(
+          `${highQuality.length} high-quality pattern(s) were available — ` +
+          "verify the output follows proven approaches."
+        );
+      }
+    } else {
+      recs.push("No historical patterns matched — this is a novel task, evaluate thoroughly.");
+    }
+
+    return recs;
   }
 
   /**
-   * Record task execution for learning
+   * Record task execution for learning.
+   * Returns true if a new pattern was learned.
    */
   private async recordTaskExecution(
     taskConfig: TaskConfig,
     output: string,
     quality: number,
-    iterations: number,
     patternIds: string[]
-  ): Promise<void> {
+  ): Promise<boolean> {
     // Store task history
     await this.memoryAgent.store(
       `task-history-${Date.now()}`,
@@ -463,7 +485,6 @@ export class AgentCoordinator {
         description: taskConfig.description,
         output,
         quality,
-        iterations,
         patterns: patternIds,
         timestamp: new Date().toISOString(),
       },
@@ -480,7 +501,9 @@ export class AgentCoordinator {
       });
       this.metrics.patternsLearned++;
       console.log(`Learned new pattern: ${pattern.id}`);
+      return true;
     }
+    return false;
   }
 
   /**
@@ -496,21 +519,20 @@ export class AgentCoordinator {
   }
 
   /**
-   * Get coordinator metrics
+   * Get coordinator metrics (includes reputation scores)
    */
-  getMetrics(): CoordinatorMetrics {
-    return { ...this.metrics };
+  async getMetrics(): Promise<CoordinatorMetrics> {
+    const reputationScores = await this.reputationManager.getAllScores();
+    return { ...this.metrics, reputationScores };
   }
 
   /**
    * Update running metrics
    */
-  private updateMetrics(quality: number, iterations: number): void {
+  private updateMetrics(quality: number): void {
     const total = this.metrics.totalTasks;
     this.metrics.averageQuality =
       (this.metrics.averageQuality * (total - 1) + quality) / total;
-    this.metrics.averageIterations =
-      (this.metrics.averageIterations * (total - 1) + iterations) / total;
 
     // Persist metrics to local memory (fire and forget)
     this.persistMetrics().catch(() => {});
@@ -548,18 +570,18 @@ export class AgentCoordinator {
   /**
    * Get coordinator status (for monitoring)
    */
-  getStatus(): {
+  async getStatus(): Promise<{
     initialized: boolean;
     sessionId: string;
     swarmId: string | null;
     metrics: CoordinatorMetrics;
     config: CoordinatorConfig;
-  } {
+  }> {
     return {
       initialized: this.initialized,
       sessionId: this.sessionId,
       swarmId: this.swarmId,
-      metrics: { ...this.metrics },
+      metrics: await this.getMetrics(),
       config: { ...this.config },
     };
   }

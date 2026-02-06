@@ -4,10 +4,10 @@
 
 // Base agent
 export { BaseAgent } from "./base-agent.js";
-export type { AgentConfig, QueryOptions, AgentMessage, AgentResult } from "./base-agent.js";
+export type { AgentConfig, QueryOptions, AgentMessage, AgentResult, AgentExecutionResult } from "./base-agent.js";
 
 // Execution backend
-export type { ExecutionBackend, ExecutionMessage, ExecutionOptions } from "./execution-backend.js";
+export type { ExecutionBackend, ExecutionMessage, ExecutionOptions, ExecutionMetadata } from "./execution-backend.js";
 export { createExecutionBackend } from "./backends/index.js";
 export type { BackendType, BackendConfig } from "./backends/index.js";
 
@@ -34,7 +34,17 @@ export type {
   EvaluationCriteria,
   EvaluationResult,
   TaskEvaluation,
+  CoordinationContext,
 } from "./evaluator-agent.js";
+
+// Reputation
+export { ReputationManager } from "./reputation.js";
+export type {
+  ReputationRecord,
+  ReputationEvent,
+  ReputationSummary,
+  ReputationConstants,
+} from "./reputation.js";
 
 // Coordinator
 export { AgentCoordinator } from "./agent-coordinator.js";

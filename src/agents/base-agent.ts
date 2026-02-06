@@ -9,7 +9,7 @@ import { getProjectRoot, isWithinProject } from "../utils/project-context.js";
 import { getDefaultPersistenceManager } from "../utils/persistence.js";
 import { getGlobalLogger, type ToolUsageLog } from "../utils/logger.js";
 import { createExecutionBackend, type BackendConfig } from "./backends/index.js";
-import type { ExecutionBackend } from "./execution-backend.js";
+import type { ExecutionBackend, ExecutionMetadata } from "./execution-backend.js";
 
 export interface AgentConfig {
   /** Model to use: 'haiku', 'sonnet', or 'opus' */
@@ -45,6 +45,17 @@ export interface AgentResult {
   error?: string;
 }
 
+/** Extended result from execute() that includes backend metadata. */
+export interface AgentExecutionResult {
+  result: string;
+  metadata: ExecutionMetadata | null;
+  toolsUsed: ToolUsageLog[];
+  errors: Array<{ timestamp: string; message: string; recoverable: boolean }>;
+  durationMs: number;
+  startTime: string;
+  endTime: string;
+}
+
 export class BaseAgent {
   protected config: AgentConfig;
   protected name: string;
@@ -69,11 +80,23 @@ export class BaseAgent {
   }
 
   /**
-   * Execute a prompt using the Claude Agent SDK
+   * Execute a prompt and return the result string.
+   * For full execution metadata use executeDetailed().
    */
   async execute(prompt: string, options?: Partial<QueryOptions>): Promise<string> {
+    const detailed = await this.executeDetailed(prompt, options);
+    return detailed.result;
+  }
+
+  /**
+   * Execute a prompt and return the full execution result including
+   * backend metadata (tokens, model, provider, cost), tool logs, errors,
+   * and timing.
+   */
+  async executeDetailed(prompt: string, options?: Partial<QueryOptions>): Promise<AgentExecutionResult> {
     let result = "";
     const executionId = `${this.name}-${Date.now()}`;
+    const startTime = new Date().toISOString();
 
     // Log execution start
     this.logger.logExecutionStart(
@@ -91,8 +114,10 @@ export class BaseAgent {
     };
 
     const toolsUsed: ToolUsageLog[] = [];
+    const errors: Array<{ timestamp: string; message: string; recoverable: boolean }> = [];
     let currentToolUsageId: string | null = null;
     let currentToolName: string | null = null;
+    let executionMetadata: ExecutionMetadata | null = null;
 
     try {
       for await (const message of this.backend.execute(prompt, {
@@ -134,12 +159,21 @@ export class BaseAgent {
           }
         } else if (message.type === "result") {
           result = message.content as string;
+        } else if (message.type === "metadata") {
+          executionMetadata = message.content as ExecutionMetadata;
         } else if (message.type === "error") {
           throw new Error(message.content as string);
         }
       }
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : String(error);
+      const endTime = new Date().toISOString();
+
+      errors.push({
+        timestamp: endTime,
+        message: errorMessage,
+        recoverable: false,
+      });
 
       // Log execution end with error
       await this.logger.logExecutionEnd(
@@ -149,11 +183,15 @@ export class BaseAgent {
         "",
         0,
         toolsUsed,
-        errorMessage
+        errorMessage,
+        executionMetadata ?? undefined
       );
 
       throw new Error(`[${this.name}] Agent execution failed: ${errorMessage}`);
     }
+
+    const endTime = new Date().toISOString();
+    const durationMs = new Date(endTime).getTime() - new Date(startTime).getTime();
 
     // Log execution end with success
     await this.logger.logExecutionEnd(
@@ -162,10 +200,20 @@ export class BaseAgent {
       0.7, // Default quality for base agent
       result,
       1,
-      toolsUsed
+      toolsUsed,
+      undefined,
+      executionMetadata ?? undefined
     );
 
-    return result;
+    return {
+      result,
+      metadata: executionMetadata,
+      toolsUsed,
+      errors,
+      durationMs,
+      startTime,
+      endTime,
+    };
   }
 
   /**
@@ -217,6 +265,13 @@ export class BaseAgent {
    */
   getConfig(): AgentConfig {
     return { ...this.config };
+  }
+
+  /**
+   * Get the execution backend name
+   */
+  getBackendName(): string {
+    return this.backend.name;
   }
 
   /**

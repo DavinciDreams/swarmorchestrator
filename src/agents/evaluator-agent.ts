@@ -1,6 +1,11 @@
 /**
- * Evaluator Agent - Specialized for quality assessment and feedback
- * Mirrors SunBurpBot's evaluator for consistent quality control
+ * Evaluator Agent - Dynamic quality assessment with coordination-aware feedback
+ *
+ * Instead of hardcoded criteria sets, the evaluator infers appropriate evaluation
+ * criteria from the task description and output format (e.g. marketing campaign,
+ * philosophical argument, API code, research paper). Feedback is shaped by
+ * recommendations from the agent coordination system (reputation scores,
+ * historical patterns) rather than generated in isolation.
  */
 
 import { BaseAgent, AgentConfig } from "./base-agent.js";
@@ -28,31 +33,18 @@ export interface TaskEvaluation {
   evaluatorId: string;
 }
 
-/** Task types that should use document-oriented evaluation criteria */
-const DOCUMENT_TASK_TYPES: Set<string> = new Set([
-  "research", "documentation",
-]);
-
-const CODE_CRITERIA: EvaluationCriteria[] = [
-  { name: "Completeness", description: "All requirements addressed", weight: 0.25 },
-  { name: "Correctness", description: "Implementation is accurate", weight: 0.25 },
-  { name: "Quality", description: "Code quality and best practices", weight: 0.2 },
-  { name: "Security", description: "No security vulnerabilities", weight: 0.15 },
-  { name: "Performance", description: "Efficient implementation", weight: 0.15 },
-];
-
-const DOCUMENT_CRITERIA: EvaluationCriteria[] = [
-  { name: "Completeness", description: "All required topics and sections are covered", weight: 0.25 },
-  { name: "Accuracy", description: "Facts, claims, and references are correct and well-sourced", weight: 0.25 },
-  { name: "Structure", description: "Logical organization, clear headings, smooth flow between sections", weight: 0.2 },
-  { name: "Clarity", description: "Writing is clear, concise, and accessible to the target audience", weight: 0.15 },
-  { name: "Depth", description: "Sufficient analysis, synthesis, and insight beyond surface-level coverage", weight: 0.15 },
-];
-
-const DEFAULT_CRITERIA = CODE_CRITERIA;
+/** Context supplied by the agent coordination system to shape evaluation feedback. */
+export interface CoordinationContext {
+  /** Reputation score (0-1) of the agent that produced the output */
+  agentReputationScore?: number;
+  /** Names of historical patterns that matched this task */
+  appliedPatterns?: string[];
+  /** Free-form recommendations from the coordination layer */
+  coordinatorRecommendations?: string[];
+}
 
 export class EvaluatorAgent extends BaseAgent {
-  private criteria: EvaluationCriteria[];
+  private criteriaOverride: EvaluationCriteria[] | null;
 
   constructor(config?: Partial<AgentConfig>, criteria?: EvaluationCriteria[]) {
     super("evaluator-agent", {
@@ -63,23 +55,31 @@ export class EvaluatorAgent extends BaseAgent {
       ...config,
     });
 
-    this.criteria = criteria || DEFAULT_CRITERIA;
+    this.criteriaOverride = criteria ?? null;
   }
 
   /**
-   * Evaluate task output against requirements.
-   * When taskType is provided, criteria are automatically selected to match
-   * the output type (e.g. research/documentation use document criteria).
+   * Evaluate task output against dynamically inferred criteria.
+   *
+   * The evaluator analyses the task description to determine the output format
+   * (code, marketing copy, philosophical essay, API design, etc.) and generates
+   * evaluation criteria tailored to that format.  When a `CoordinationContext`
+   * is provided the feedback incorporates reputation data and pattern
+   * recommendations from the coordination layer.
    */
   async evaluateTask(
     taskId: string,
     taskDescription: string,
     requirements: string[],
     outputPath: string,
-    taskType?: TaskType
+    taskType?: TaskType,
+    coordination?: CoordinationContext
   ): Promise<TaskEvaluation> {
-    const activeCriteria = this.resolveCriteria(taskType);
-    const systemPrompt = this.buildSystemPrompt(activeCriteria, taskType);
+    // If the caller set explicit criteria, use those; otherwise infer dynamically
+    const activeCriteria = this.criteriaOverride
+      ?? await this.inferCriteria(taskDescription, taskType);
+
+    const systemPrompt = this.buildSystemPrompt(activeCriteria, coordination);
     const userPrompt = this.buildEvaluationPrompt(taskDescription, requirements, outputPath);
 
     const response = await this.executeWithContext(systemPrompt, userPrompt);
@@ -97,7 +97,7 @@ export class EvaluatorAgent extends BaseAgent {
    * Evaluate code quality
    */
   async evaluateCodeQuality(filePath: string): Promise<EvaluationResult> {
-    const systemPrompt = this.buildSystemPrompt();
+    const systemPrompt = this.buildSystemPrompt(await this.inferCriteria(`code file: ${filePath}`));
     const userPrompt = `Evaluate the code quality of: ${filePath}
 
 Read the file and assess against these criteria:
@@ -122,7 +122,7 @@ Provide a quality score (0.0-1.0) and specific feedback.`;
     expectedOutput: string,
     actualOutput: string
   ): Promise<EvaluationResult> {
-    const systemPrompt = this.buildSystemPrompt();
+    const systemPrompt = this.buildSystemPrompt(await this.inferCriteria(`swarm output comparison`));
     const userPrompt = `Evaluate swarm output quality:
 
 Swarm ID: ${swarmId}
@@ -146,74 +146,99 @@ Provide a score (0.0-1.0) and detailed feedback.`;
   }
 
   /**
-   * Generate improvement suggestions appropriate to the task type.
-   * For research/documentation tasks, suggestions focus on content quality
-   * rather than code quality.
-   */
-  async generateImprovementSuggestions(
-    evaluation: EvaluationResult,
-    taskType?: TaskType
-  ): Promise<string[]> {
-    if (evaluation.score >= 0.9) {
-      return ["Output meets quality standards. No significant improvements needed."];
-    }
-
-    const activeCriteria = this.resolveCriteria(taskType);
-    const systemPrompt = this.buildSystemPrompt(activeCriteria, taskType);
-
-    const contextNote = DOCUMENT_TASK_TYPES.has(taskType || "")
-      ? "This is a document/research output — suggestions must focus on content, structure, accuracy, and clarity. Do NOT suggest code changes, unit tests, input validation, security hardening, or other software engineering practices."
-      : "";
-
-    const userPrompt = `Based on this evaluation, generate improvement suggestions:
-
-Score: ${evaluation.score}
-Failed Criteria: ${evaluation.failedCriteria.join(", ") || "None"}
-Feedback:
-${evaluation.feedback.map((f) => `- ${f}`).join("\n")}
-
-${contextNote}
-
-Provide specific, actionable suggestions to address each failed criterion.
-Prioritize by impact and ease of implementation.`;
-
-    const response = await this.executeWithContext(systemPrompt, userPrompt);
-    return this.parseSuggestions(response);
-  }
-
-  /**
-   * Set custom evaluation criteria
+   * Set custom evaluation criteria (overrides dynamic inference)
    */
   setCriteria(criteria: EvaluationCriteria[]): void {
-    this.criteria = criteria;
+    this.criteriaOverride = criteria;
   }
 
   /**
-   * Get current criteria
+   * Clear custom criteria override, reverting to dynamic inference.
    */
-  getCriteria(): EvaluationCriteria[] {
-    return [...this.criteria];
+  clearCriteriaOverride(): void {
+    this.criteriaOverride = null;
   }
 
   /**
-   * Select the right criteria set for the given task type.
-   * If custom criteria were set via setCriteria(), those always take priority.
-   * Otherwise, document task types get DOCUMENT_CRITERIA and everything else gets CODE_CRITERIA.
+   * Get current criteria override, or null if using dynamic inference.
    */
-  private resolveCriteria(taskType?: string): EvaluationCriteria[] {
-    // Custom criteria set by the caller always win
-    if (this.criteria !== DEFAULT_CRITERIA) {
-      return this.criteria;
+  getCriteriaOverride(): EvaluationCriteria[] | null {
+    return this.criteriaOverride ? [...this.criteriaOverride] : null;
+  }
+
+  /**
+   * Dynamically infer evaluation criteria from the task description.
+   *
+   * Asks the LLM to classify the output format and return 3-6 weighted
+   * criteria appropriate for that format. Falls back to a sensible default
+   * if parsing fails.
+   */
+  private async inferCriteria(
+    taskDescription: string,
+    taskType?: string
+  ): Promise<EvaluationCriteria[]> {
+    const prompt = `Given this task, determine the output format and return evaluation criteria.
+
+TASK TYPE: ${taskType ?? "unknown"}
+TASK: ${taskDescription}
+
+First identify the output format (e.g. source code, marketing campaign, philosophical argument,
+research paper, API design, creative writing, business plan, technical documentation, data analysis, etc.).
+
+Then return 3-6 evaluation criteria as a JSON array. Each criterion needs:
+- "name": short label
+- "description": what it measures
+- "weight": number between 0 and 1 (all weights must sum to 1.0)
+
+Choose criteria that genuinely matter for this specific output format.
+For example a marketing campaign needs Persuasiveness and Audience Fit,
+while a philosophical argument needs Logical Validity and Conceptual Clarity.
+
+Respond ONLY with the JSON array, no other text.`;
+
+    try {
+      const response = await this.executeWithContext(
+        "You are a criteria-inference engine. Return ONLY a valid JSON array.",
+        prompt
+      );
+      const parsed = JSON.parse(this.extractJson(response));
+      if (Array.isArray(parsed) && parsed.length >= 2) {
+        // Validate and normalise weights
+        const total = parsed.reduce((s: number, c: { weight?: number }) => s + (c.weight ?? 0), 0);
+        return parsed.map((c: { name?: string; description?: string; weight?: number }) => ({
+          name: String(c.name ?? "Unnamed"),
+          description: String(c.description ?? ""),
+          weight: total > 0 ? (c.weight ?? 0) / total : 1 / parsed.length,
+        }));
+      }
+    } catch {
+      // Fall through to default
     }
-    if (taskType && DOCUMENT_TASK_TYPES.has(taskType)) {
-      return DOCUMENT_CRITERIA;
-    }
-    return CODE_CRITERIA;
+
+    // Sensible fallback when inference fails
+    return [
+      { name: "Completeness", description: "All requirements addressed", weight: 0.3 },
+      { name: "Correctness", description: "Output is accurate and valid", weight: 0.3 },
+      { name: "Quality", description: "Well-crafted and appropriate for the format", weight: 0.2 },
+      { name: "Coherence", description: "Internally consistent and logically structured", weight: 0.2 },
+    ];
+  }
+
+  /**
+   * Extract a JSON array from a response that may contain markdown fences or preamble.
+   */
+  private extractJson(response: string): string {
+    // Try to find a JSON array in the response
+    const fenceMatch = response.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (fenceMatch) return fenceMatch[1].trim();
+    const arrayMatch = response.match(/\[[\s\S]*\]/);
+    if (arrayMatch) return arrayMatch[0];
+    return response.trim();
   }
 
   private buildSystemPrompt(
     activeCriteria?: EvaluationCriteria[],
-    taskType?: string
+    coordination?: CoordinationContext
   ): string {
     let projectContext = "";
     try {
@@ -222,35 +247,54 @@ Prioritize by impact and ease of implementation.`;
       // Project root not set
     }
 
-    const criteria = activeCriteria || this.criteria;
+    const criteria = activeCriteria ?? [
+      { name: "Completeness", description: "All requirements addressed", weight: 0.3 },
+      { name: "Correctness", description: "Output is accurate and valid", weight: 0.3 },
+      { name: "Quality", description: "Well-crafted and appropriate", weight: 0.2 },
+      { name: "Coherence", description: "Internally consistent", weight: 0.2 },
+    ];
     const criteriaList = criteria
       .map((c) => `- ${c.name} (${(c.weight * 100).toFixed(0)}%): ${c.description}`)
       .join("\n");
 
-    const isDocumentTask = taskType && DOCUMENT_TASK_TYPES.has(taskType);
+    // Build coordination context section when available
+    let coordinationSection = "";
+    if (coordination) {
+      const parts: string[] = [];
+      if (coordination.agentReputationScore !== undefined) {
+        parts.push(
+          `Agent reputation score: ${coordination.agentReputationScore.toFixed(2)} — ` +
+          `${coordination.agentReputationScore >= 0.7 ? "trusted agent, focus on output quality" : "lower-trust agent, scrutinise correctness carefully"}.`
+        );
+      }
+      if (coordination.appliedPatterns?.length) {
+        parts.push(`Historical patterns applied: ${coordination.appliedPatterns.join(", ")}.`);
+      }
+      if (coordination.coordinatorRecommendations?.length) {
+        parts.push(
+          "Coordinator recommendations (incorporate into your feedback):\n" +
+          coordination.coordinatorRecommendations.map((r) => `  - ${r}`).join("\n")
+        );
+      }
+      if (parts.length) {
+        coordinationSection = `\nCoordination Context:\n${parts.join("\n")}\n`;
+      }
+    }
 
-    const roleDescription = isDocumentTask
-      ? `You are a Document Quality Evaluation Agent responsible for assessing research and documentation outputs.
-
-IMPORTANT: You are evaluating a written document, NOT source code. All feedback and recommendations
-must be about the document's content, structure, accuracy, clarity, and depth. Do NOT suggest
-code-related improvements such as input validation, unit tests, error handling, security hardening,
-performance optimization, API endpoints, linting, or any software engineering practices.`
-      : `You are a Quality Evaluation Agent responsible for assessing task outputs and providing constructive feedback.`;
-
-    return `${roleDescription}
+    return `You are a Quality Evaluation Agent. Your evaluation criteria are dynamically tailored
+to the specific output format of this task. Evaluate the output ONLY against the criteria listed
+below — do not import criteria from other domains.
 
 ${projectContext}
 
 Evaluation Criteria:
 ${criteriaList}
-
+${coordinationSection}
 Your responsibilities:
-1. Objectively evaluate outputs against requirements
-2. Provide specific, actionable feedback
+1. Objectively evaluate outputs against the listed criteria and requirements
+2. Provide specific, actionable feedback appropriate to the output format
 3. Calculate weighted quality scores
-4. Identify areas for improvement
-5. Generate improvement recommendations
+4. When coordination context is provided, incorporate those recommendations into your feedback
 
 Response format for evaluations:
 SCORE: <0.0-1.0>
